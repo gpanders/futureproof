@@ -6,8 +6,8 @@ const Tui = @import("tui.zig").Tui;
 
 pub fn main() anyerror!void {
     var gp_alloc = std.heap.GeneralPurposeAllocator(.{}){};
-    defer std.testing.expect(!gp_alloc.deinit());
-    const alloc: *std.mem.Allocator = &gp_alloc.allocator;
+    defer std.debug.assert(gp_alloc.deinit() == .ok);
+    const alloc = gp_alloc.allocator();
 
     if (c.glfwInit() != c.GLFW_TRUE) {
         std.debug.panic("Could not initialize glfw", .{});

@@ -12,9 +12,9 @@ pub const Buffer = struct {
     const Self = @This();
 
     lines: [][]const u8,
-    alloc: *std.mem.Allocator,
+    alloc: std.mem.Allocator,
 
-    pub fn init(alloc: *std.mem.Allocator) !Self {
+    pub fn init(alloc: std.mem.Allocator) !Self {
         const lines = try alloc.alloc([]const u8, 0);
         return Self{
             .lines = lines,
@@ -38,7 +38,7 @@ pub const Buffer = struct {
 
         var pos: usize = 0;
         for (self.lines) |line| {
-            std.mem.copy(u8, out[pos..(pos + line.len)], line);
+            @memcpy(out[pos..(pos + line.len)], line);
             out[pos + line.len] = '\n';
             pos += line.len + 1;
         }
@@ -117,25 +117,22 @@ pub const Buffer = struct {
 
     // This API event is the only one which returns 'true', indicating
     // that the buffer should be destroyed
-    fn api_detach_event(self: *Buffer, args: []const msgpack.Value) !Status {
+    fn api_detach_event(_: *Buffer, _: []const msgpack.Value) !Status {
         return Status.Done;
     }
 
     pub fn rpc_method(self: *Buffer, name: []const u8, args: []const msgpack.Value) !Status {
         // Same trick as in tui.zig
-        comptime const opts = std.builtin.CallOptions{};
         inline for (@typeInfo(Self).Struct.decls) |s| {
-            // This conditional should be optimized out, since
-            // it's known at comptime.
-            comptime const is_api = std.mem.startsWith(u8, s.name, "api_");
-            if (is_api) {
+            // This conditional should be optimized out, since it's known at comptime.
+            if (comptime std.mem.startsWith(u8, s.name, "api_")) {
                 // Skip nvim_buf_ in the RPC name and api_ in the API name
                 if (std.mem.eql(u8, name[9..], s.name[4..])) {
-                    return @call(opts, @field(Self, s.name), .{ self, args });
+                    return @call(.auto, @field(Self, s.name), .{ self, args });
                 }
             }
         }
-        std.debug.warn("[Buffer] Unimplemented API: {}\n", .{name});
+        std.debug.print("[Buffer] Unimplemented API: {s}\n", .{name});
         return Status.Okay;
     }
 };

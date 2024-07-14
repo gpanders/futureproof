@@ -14,15 +14,11 @@ pub fn build(b: *std.Build) void {
     // Libraries!
     exe.linkSystemLibrary("glfw3");
     exe.linkSystemLibrary("freetype2");
-    exe.linkSystemLibrary("stdc++"); // needed for shaderc
+    exe.linkSystemLibrary("shaderc_combined");
 
     exe.addLibraryPath(b.path("vendor/wgpu"));
     exe.linkSystemLibrary("wgpu_native");
     exe.addIncludePath(b.path("vendor")); // "wgpu/wgpu.h" is the wgpu header
-
-    exe.addLibraryPath(b.path("vendor/shaderc/lib"));
-    exe.linkSystemLibrary("shaderc_combined");
-    exe.addIncludePath(b.path("vendor/shaderc/include/"));
 
     exe.addIncludePath(b.path(".")); // for "extern/futureproof.h"
 

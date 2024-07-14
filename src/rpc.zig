@@ -4,9 +4,11 @@ const std = @import("std");
 
 const c = @import("c.zig");
 const msgpack = @import("msgpack.zig");
-const blocking_queue = @import("blocking_queue.zig");
+const BlockingQueue = @import("blocking_queue.zig").BlockingQueue;
 
-const RPCQueue = blocking_queue.BlockingQueue(msgpack.Value);
+const queue_capacity = 128; // TODO: Figure out a good value for this
+
+const RPCQueue = BlockingQueue(msgpack.Value, queue_capacity);
 
 const RPC_TYPE_REQUEST: u32 = 0;
 const RPC_TYPE_RESPONSE: u32 = 1;
@@ -16,7 +18,7 @@ const Listener = struct {
     input: std.fs.File.Reader, // This is the stdout of the RPC subprocess
     event_queue: RPCQueue,
     response_queue: RPCQueue,
-    alloc: *std.mem.Allocator,
+    alloc: std.mem.Allocator,
 
     fn run(self: *Listener) !void {
         var buf: [1024 * 1024]u8 = undefined;
@@ -49,13 +51,13 @@ pub const RPC = struct {
     listener: *Listener,
 
     output: std.fs.File.Writer, // This is the stdin of the RPC subprocess
-    process: *std.ChildProcess,
-    thread: *std.Thread,
-    alloc: *std.mem.Allocator,
+    process: std.process.Child,
+    thread: std.Thread,
+    alloc: std.mem.Allocator,
     msgid: u32,
 
-    pub fn init(argv: []const []const u8, alloc: *std.mem.Allocator) !RPC {
-        const child = try std.ChildProcess.init(argv, alloc);
+    pub fn init(argv: []const []const u8, alloc: std.mem.Allocator) !RPC {
+        var child = std.process.Child.init(argv, alloc);
         child.stdin_behavior = .Pipe;
         child.stdout_behavior = .Pipe;
         try child.spawn();
@@ -64,13 +66,13 @@ pub const RPC = struct {
 
         const listener = try alloc.create(Listener);
         listener.* = .{
-            .event_queue = RPCQueue.init(alloc),
-            .response_queue = RPCQueue.init(alloc),
+            .event_queue = .{},
+            .response_queue = .{},
             .input = (child.stdout orelse std.debug.panic("Could not get stdout", .{})).reader(),
             .alloc = alloc,
         };
 
-        const thread = try std.Thread.spawn(listener, Listener.run);
+        const thread = try std.Thread.spawn(.{}, Listener.run, .{listener});
 
         const rpc = .{
             .listener = listener,
@@ -84,7 +86,7 @@ pub const RPC = struct {
     }
 
     pub fn get_event(self: *RPC) ?msgpack.Value {
-        return self.listener.event_queue.try_get();
+        return self.listener.event_queue.tryGet();
     }
 
     pub fn release(self: *RPC, value: msgpack.Value) void {
@@ -98,7 +100,7 @@ pub const RPC = struct {
     pub fn call(self: *RPC, method: []const u8, params: anytype) !msgpack.Value {
         // We'll use an arena for the encoded message
         var arena = std.heap.ArenaAllocator.init(self.alloc);
-        const tmp_alloc: *std.mem.Allocator = &arena.allocator;
+        const tmp_alloc = arena.allocator();
         defer arena.deinit();
 
         // Push the serialized call to the subprocess's stdin
@@ -117,7 +119,7 @@ pub const RPC = struct {
         // Check for error responses
         const err = response.Array[2];
         const result = response.Array[3];
-        if (err != @TagType(msgpack.Value).Nil) {
+        if (err != .Nil) {
             // TODO: handle error here
             std.debug.panic("Got error in msgpack-rpc call: {}\n", .{err.Array[1]});
         }
@@ -130,16 +132,15 @@ pub const RPC = struct {
     }
 
     pub fn deinit(self: *RPC) void {
-        self.process.deinit();
         self.alloc.destroy(self.listener);
     }
 
-    pub fn halt(self: *RPC) !std.ChildProcess.Term {
+    pub fn halt(self: *RPC) !std.process.Child.Term {
         // Manually close stdin, to halt the subprocess on the other side
         (self.process.stdin orelse unreachable).close();
         self.process.stdin = null;
         const term = try self.process.wait();
-        self.thread.wait();
+        self.thread.join();
 
         // Flush out the queue to avoid memory leaks
         while (self.get_event()) |event| {

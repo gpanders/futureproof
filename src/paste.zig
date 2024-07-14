@@ -16,7 +16,7 @@ pub fn get_clipboard() [*c]u8 {
         const item = objc.call_(items, "objectAtIndex:", @as(c_ulong, 0));
         const str = objc.call_(item, "stringForType:", darwin.NSPasteboardTypeString);
 
-        return @ptrCast([*c]u8, objc.call(str, "UTF8String"));
+        return @ptrCast(objc.call(str, "UTF8String"));
     } else {
         std.debug.panic("Unimplemented on platform {}", .{platform});
     }

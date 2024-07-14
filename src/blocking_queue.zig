@@ -1,66 +1,64 @@
 const std = @import("std");
 
-// A blocking SPSC queue, used so that threads can sleep while waiting
-// for another thread to pass them data.
-pub fn BlockingQueue(comptime T: type) type {
+pub fn BlockingQueue(comptime T: type, comptime capacity: usize) type {
     return struct {
-        inner: std.atomic.Queue(T),
-        event: std.ResetEvent,
-        alloc: *std.mem.Allocator,
+        items: [capacity]T = undefined,
+        read: usize = 0,
+        write: usize = 0,
+        empty: bool = true,
+        lock: std.Thread.Mutex = .{},
+        cv: std.Thread.Condition = .{},
 
-        pub const Self = @This();
+        const Self = @This();
 
-        pub fn init(alloc: *std.mem.Allocator) Self {
-            var event: std.ResetEvent = undefined;
-            std.ResetEvent.init(&event) catch |err| {
-                std.debug.panic("Failed to initialize event: {}\n", .{err});
-            };
-            return .{
-                .inner = std.atomic.Queue(T).init(),
-                .event = event,
-                .alloc = alloc,
-            };
-        }
+        pub fn put(self: *Self, value: T) !void {
+            self.lock.lock();
+            defer self.lock.unlock();
 
-        pub fn put(self: *Self, i: T) !void {
-            const node = try self.alloc.create(std.atomic.Queue(T).Node);
-            node.* = .{
-                .prev = undefined,
-                .next = undefined,
-                .data = i,
-            };
-            self.inner.put(node);
-            self.event.set();
+            if (self.read == self.write and !self.empty) {
+                return error.OutOfMemory;
+            }
+
+            self.items[self.write] = value;
+            self.write = self.write + 1;
+            if (self.write >= capacity) {
+                self.write -= capacity;
+            }
+
+            self.empty = false;
+            self.cv.signal();
         }
 
         pub fn get(self: *Self) T {
-            self.event.wait();
+            self.lock.lock();
+            defer self.lock.unlock();
+            while (self.empty) {
+                self.cv.wait(&self.lock);
+            }
 
-            const node = self.inner.get() orelse std.debug.panic("Could not get node", .{});
-            defer self.alloc.destroy(node);
-            self.check_flag();
+            const value = self.tryGet() orelse
+                // We already waited for the queue to be non-empty
+                unreachable;
 
-            return node.data;
+            return value;
         }
 
-        fn check_flag(self: *Self) void {
-            const lock = self.inner.mutex.acquire();
-            defer lock.release();
+        pub fn tryGet(self: *Self) ?T {
+            self.lock.lock();
+            defer self.lock.unlock();
 
-            // Manually check the state of the queue, as isEmpty() would
-            // also try to lock the mutex, causing a deadlock
-            if (self.inner.head == null) {
-                self.event.reset();
+            if (self.empty) {
+                return null;
             }
-        }
 
-        pub fn try_get(self: *Self) ?T {
-            if (self.inner.get()) |node| {
-                defer self.alloc.destroy(node);
-                self.check_flag();
-                return node.data;
+            const value = self.items[self.read];
+            self.read = self.read + 1;
+            if (self.read >= capacity) {
+                self.read -= capacity;
             }
-            return null;
+
+            self.empty = self.read == self.write;
+            return value;
         }
     };
 }

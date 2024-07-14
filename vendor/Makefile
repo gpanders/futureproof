@@ -1,7 +1,7 @@
 all:
-	@echo "Usage: make [wgpu|shaderc]"
+	@echo "Usage: make [wgpu]"
 
-.PHONY: wgpu shaderc nvim
+.PHONY: wgpu
 
 WGPU=wgpu-macos-64-release.zip
 wgpu:
@@ -9,10 +9,3 @@ wgpu:
 	unzip -dwgpu ${WGPU}
 	rm ${WGPU}
 	cd wgpu && install_name_tool -id "@executable_path/../../vendor/wgpu/libwgpu_native.dylib" libwgpu_native.dylib
-
-SHADERC=install.tgz
-shaderc:
-	wget https://storage.googleapis.com/shaderc/artifacts/prod/graphics_shader_compiler/shaderc/macos/continuous_clang_release/347/20200903-075048/${SHADERC}
-	tar -xvzf ${SHADERC}
-	rm ${SHADERC}
-	mv install shaderc

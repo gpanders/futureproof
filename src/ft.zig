@@ -4,7 +4,7 @@ const c = @import("c.zig");
 pub const Atlas = struct {
     const Self = @This();
 
-    alloc: *std.mem.Allocator,
+    alloc: std.mem.Allocator,
 
     // Font atlas texture
     tex: []u32,
@@ -50,7 +50,7 @@ pub const Atlas = struct {
 
         const char_index = c.FT_Get_Char_Index(self.face, codepoint);
         if (char_index == 0) {
-            std.debug.warn("Could not get char for codepoint {x}\n", .{codepoint});
+            std.debug.print("Could not get char for codepoint {x}\n", .{codepoint});
         }
         try status_to_err(c.FT_Load_Glyph(
             self.face,
@@ -59,13 +59,13 @@ pub const Atlas = struct {
         ));
         try status_to_err(c.FT_Render_Glyph(
             self.face.*.glyph,
-            c.FT_Render_Mode.FT_RENDER_MODE_LCD,
+            c.FT_RENDER_MODE_LCD,
         ));
         const glyph = self.face.*.glyph;
         const bmp = &(glyph.*.bitmap);
 
         { // Store the glyph advance
-            const advance = @intCast(u32, glyph.*.advance.x >> 6);
+            const advance: u32 = @intCast(glyph.*.advance.x >> 6);
             if (!self.has_advance) {
                 self.has_advance = true;
                 self.u.glyph_advance = advance;
@@ -89,25 +89,25 @@ pub const Atlas = struct {
             self.max_row_height = bmp.*.rows;
         }
         var row: usize = 0;
-        const pitch: usize = @intCast(usize, bmp.*.pitch);
+        const pitch: usize = @intCast(bmp.*.pitch);
         while (row < bmp.*.rows) : (row += 1) {
             var col: usize = 0;
             while (col < bmp_width) : (col += 1) {
                 const p: u32 = 0 |
-                    @intCast(u32, bmp.*.buffer[row * pitch + col * 3]) |
-                    (@intCast(u32, bmp.*.buffer[row * pitch + col * 3 + 1]) << 8) |
-                    (@intCast(u32, bmp.*.buffer[row * pitch + col * 3 + 2]) << 16);
+                    @as(u32, @intCast(bmp.*.buffer[row * pitch + col * 3])) |
+                    (@as(u32, @intCast(bmp.*.buffer[row * pitch + col * 3 + 1])) << 8) |
+                    (@as(u32, @intCast(bmp.*.buffer[row * pitch + col * 3 + 2])) << 16);
                 self.tex[self.x + col + self.tex_size * (row + self.y)] = p;
             }
         }
-        const offset = @intCast(i32, self.face.*.size.*.metrics.descender >> 6);
+        const offset: i32 = @intCast(self.face.*.size.*.metrics.descender >> 6);
         self.u.glyphs[g] = c.fpGlyph{
             .x0 = self.x,
             .y0 = self.y,
             .width = bmp_width,
             .height = bmp.*.rows,
             .x_offset = glyph.*.bitmap_left,
-            .y_offset = glyph.*.bitmap_top - @intCast(i32, bmp.*.rows) - offset,
+            .y_offset = glyph.*.bitmap_top - @as(i32, @intCast(bmp.*.rows)) - offset,
         };
         self.x += bmp_width;
 
@@ -116,13 +116,13 @@ pub const Atlas = struct {
 };
 
 pub fn build_atlas(
-    alloc: *std.mem.Allocator,
+    alloc: std.mem.Allocator,
     comptime font_name: []const u8,
     font_size: u32,
     tex_size: u32,
 ) !Atlas {
     const tex = try alloc.alloc(u32, tex_size * tex_size);
-    std.mem.set(u32, tex, 128);
+    @memset(tex, 128);
     var out = Atlas{
         .alloc = alloc,
 
@@ -139,7 +139,7 @@ pub fn build_atlas(
         .ft = undefined,
         .face = undefined,
 
-        .table = std.hash_map.AutoHashMapUnmanaged(u32, u32).init(alloc),
+        .table = .{},
 
         // GPU uniforms
         .u = undefined,
@@ -150,8 +150,8 @@ pub fn build_atlas(
     try status_to_err(c.FT_New_Face(out.ft, font_name.ptr, 0, &out.face));
     try status_to_err(c.FT_Set_Pixel_Sizes(
         out.face,
-        @intCast(c_uint, font_size),
-        @intCast(c_uint, font_size),
+        @intCast(font_size),
+        @intCast(font_size),
     ));
 
     var i = out.glyph_index;

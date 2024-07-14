@@ -39,9 +39,9 @@ pub const Renderer = struct {
     dt: [5]i64,
     dt_index: usize,
 
-    pub fn init(alloc: *std.mem.Allocator, window: *c.GLFWwindow, font: *const ft.Atlas) !Self {
+    pub fn init(alloc: std.mem.Allocator, window: *c.GLFWwindow, font: *const ft.Atlas) !Self {
         var arena = std.heap.ArenaAllocator.init(alloc);
-        const tmp_alloc: *std.mem.Allocator = &arena.allocator;
+        const tmp_alloc = arena.allocator();
         defer arena.deinit();
 
         // Extract the WGPU Surface from the platform-specific window
@@ -55,7 +55,7 @@ pub const Renderer = struct {
             const darwin = @import("darwin.zig");
 
             const cocoa_window = darwin.glfwGetCocoaWindow(window);
-            const ns_window = @ptrCast(c.id, @alignCast(8, cocoa_window));
+            const ns_window: c.id = @ptrCast(@alignCast(cocoa_window));
 
             const cv = objc.call(ns_window, "contentView");
             _ = objc.call_(cv, "setWantsLayer:", true);
@@ -74,14 +74,14 @@ pub const Renderer = struct {
         // WGPU initial setup
         var adapter: c.WGPUAdapterId = 0;
         c.wgpu_request_adapter_async(&(c.WGPURequestAdapterOptions){
-            .power_preference = c.WGPUPowerPreference._HighPerformance,
+            .power_preference = c.WGPUPowerPreference_HighPerformance,
             .compatible_surface = surface,
         }, 2 | 4 | 8, false, adapter_cb, &adapter);
 
         const device = c.wgpu_adapter_request_device(
             adapter,
             0,
-            &(c.WGPUCLimits){
+            &.{
                 .max_bind_groups = 1,
             },
             true,
@@ -93,7 +93,7 @@ pub const Renderer = struct {
         const vert_spv = try shaderc.build_shader_from_file(tmp_alloc, "shaders/grid.vert");
         const vert_shader = c.wgpu_device_create_shader_module(
             device,
-            (c.WGPUShaderSource){
+            .{
                 .bytes = vert_spv.ptr,
                 .length = vert_spv.len,
             },
@@ -103,7 +103,7 @@ pub const Renderer = struct {
         const frag_spv = try shaderc.build_shader_from_file(tmp_alloc, "shaders/grid.frag");
         const frag_shader = c.wgpu_device_create_shader_module(
             device,
-            (c.WGPUShaderSource){
+            .{
                 .bytes = frag_spv.ptr,
                 .length = frag_spv.len,
             },
@@ -113,19 +113,19 @@ pub const Renderer = struct {
         ////////////////////////////////////////////////////////////////////////////
         // Upload the font atlas texture
         const tex_size = (c.WGPUExtent3d){
-            .width = @intCast(u32, font.tex_size),
-            .height = @intCast(u32, font.tex_size),
+            .width = @intCast(font.tex_size),
+            .height = @intCast(font.tex_size),
             .depth = 1,
         };
 
         const tex = c.wgpu_device_create_texture(
             device,
-            &(c.WGPUTextureDescriptor){
+            &.{
                 .size = tex_size,
                 .mip_level_count = 1,
                 .sample_count = 1,
-                .dimension = c.WGPUTextureDimension._D2,
-                .format = c.WGPUTextureFormat._Rgba8Unorm,
+                .dimension = c.WGPUTextureDimension_D2,
+                .format = c.WGPUTextureFormat_Rgba8Unorm,
                 // SAMPLED tells wgpu that we want to use this texture in shaders
                 // COPY_DST means that we want to copy data to this texture
                 .usage = c.WGPUTextureUsage_SAMPLED | c.WGPUTextureUsage_COPY_DST,
@@ -135,11 +135,11 @@ pub const Renderer = struct {
 
         const tex_view = c.wgpu_texture_create_view(
             tex,
-            &(c.WGPUTextureViewDescriptor){
+            &.{
                 .label = "font_atlas_view",
-                .dimension = c.WGPUTextureViewDimension._D2,
-                .format = c.WGPUTextureFormat._Rgba8Unorm,
-                .aspect = c.WGPUTextureAspect._All,
+                .dimension = c.WGPUTextureViewDimension_D2,
+                .format = c.WGPUTextureFormat_Rgba8Unorm,
+                .aspect = c.WGPUTextureAspect_All,
                 .base_mip_level = 0,
                 .level_count = 1,
                 .base_array_layer = 0,
@@ -149,18 +149,18 @@ pub const Renderer = struct {
 
         const tex_sampler = c.wgpu_device_create_sampler(
             device,
-            &(c.WGPUSamplerDescriptor){
+            &.{
                 .next_in_chain = null,
                 .label = "font_atlas_sampler",
-                .address_mode_u = c.WGPUAddressMode._ClampToEdge,
-                .address_mode_v = c.WGPUAddressMode._ClampToEdge,
-                .address_mode_w = c.WGPUAddressMode._ClampToEdge,
-                .mag_filter = c.WGPUFilterMode._Linear,
-                .min_filter = c.WGPUFilterMode._Nearest,
-                .mipmap_filter = c.WGPUFilterMode._Nearest,
+                .address_mode_u = c.WGPUAddressMode_ClampToEdge,
+                .address_mode_v = c.WGPUAddressMode_ClampToEdge,
+                .address_mode_w = c.WGPUAddressMode_ClampToEdge,
+                .mag_filter = c.WGPUFilterMode_Linear,
+                .min_filter = c.WGPUFilterMode_Nearest,
+                .mipmap_filter = c.WGPUFilterMode_Nearest,
                 .lod_min_clamp = 0.0,
-                .lod_max_clamp = std.math.f32_max,
-                .compare = c.WGPUCompareFunction._Undefined,
+                .lod_max_clamp = std.math.floatMax(f32),
+                .compare = c.WGPUCompareFunction_Undefined,
             },
         );
 
@@ -168,7 +168,7 @@ pub const Renderer = struct {
         // Uniform buffers
         const uniform_buffer = c.wgpu_device_create_buffer(
             device,
-            &(c.WGPUBufferDescriptor){
+            &.{
                 .label = "Uniforms",
                 .size = @sizeOf(c.fpUniforms),
                 .usage = c.WGPUBufferUsage_UNIFORM | c.WGPUBufferUsage_COPY_DST,
@@ -177,7 +177,7 @@ pub const Renderer = struct {
         );
         const char_grid_buffer = c.wgpu_device_create_buffer(
             device,
-            &(c.WGPUBufferDescriptor){
+            &.{
                 .label = "Character grid",
                 .size = @sizeOf(u32) * 512 * 512,
                 .usage = c.WGPUBufferUsage_STORAGE | c.WGPUBufferUsage_COPY_DST,
@@ -188,21 +188,21 @@ pub const Renderer = struct {
         ////////////////////////////////////////////////////////////////////////////
         // Bind groups (?!)
         const bind_group_layout_entries = [_]c.WGPUBindGroupLayoutEntry{
-            (c.WGPUBindGroupLayoutEntry){
+            .{
                 .binding = 0,
                 .visibility = c.WGPUShaderStage_FRAGMENT,
                 .ty = c.WGPUBindingType_SampledTexture,
 
                 .multisampled = false,
-                .view_dimension = c.WGPUTextureViewDimension._D2,
-                .texture_component_type = c.WGPUTextureComponentType._Uint,
-                .storage_texture_format = c.WGPUTextureFormat._Rgba8Unorm,
+                .view_dimension = c.WGPUTextureViewDimension_D2,
+                .texture_component_type = c.WGPUTextureComponentType_Uint,
+                .storage_texture_format = c.WGPUTextureFormat_Rgba8Unorm,
 
                 .count = undefined,
                 .has_dynamic_offset = undefined,
                 .min_buffer_binding_size = undefined,
             },
-            (c.WGPUBindGroupLayoutEntry){
+            .{
                 .binding = 1,
                 .visibility = c.WGPUShaderStage_FRAGMENT,
                 .ty = c.WGPUBindingType_Sampler,
@@ -215,7 +215,7 @@ pub const Renderer = struct {
                 .has_dynamic_offset = undefined,
                 .min_buffer_binding_size = undefined,
             },
-            (c.WGPUBindGroupLayoutEntry){
+            .{
                 .binding = 2,
                 .visibility = c.WGPUShaderStage_VERTEX | c.WGPUShaderStage_FRAGMENT,
                 .ty = c.WGPUBindingType_UniformBuffer,
@@ -229,7 +229,7 @@ pub const Renderer = struct {
                 .storage_texture_format = undefined,
                 .count = undefined,
             },
-            (c.WGPUBindGroupLayoutEntry){
+            .{
                 .binding = 3,
                 .visibility = c.WGPUShaderStage_VERTEX,
                 .ty = c.WGPUBindingType_StorageBuffer,
@@ -246,7 +246,7 @@ pub const Renderer = struct {
         };
         const bind_group_layout = c.wgpu_device_create_bind_group_layout(
             device,
-            &(c.WGPUBindGroupLayoutDescriptor){
+            &.{
                 .label = "bind group layout",
                 .entries = &bind_group_layout_entries,
                 .entries_length = bind_group_layout_entries.len,
@@ -255,7 +255,7 @@ pub const Renderer = struct {
         defer c.wgpu_bind_group_layout_destroy(bind_group_layout);
 
         const bind_group_entries = [_]c.WGPUBindGroupEntry{
-            (c.WGPUBindGroupEntry){
+            .{
                 .binding = 0,
                 .texture_view = tex_view,
                 .sampler = 0, // None
@@ -264,7 +264,7 @@ pub const Renderer = struct {
                 .offset = undefined,
                 .size = undefined,
             },
-            (c.WGPUBindGroupEntry){
+            .{
                 .binding = 1,
                 .sampler = tex_sampler,
                 .texture_view = 0, // None
@@ -273,7 +273,7 @@ pub const Renderer = struct {
                 .offset = undefined,
                 .size = undefined,
             },
-            (c.WGPUBindGroupEntry){
+            .{
                 .binding = 2,
                 .buffer = uniform_buffer,
                 .offset = 0,
@@ -282,7 +282,7 @@ pub const Renderer = struct {
                 .sampler = 0, // None
                 .texture_view = 0, // None
             },
-            (c.WGPUBindGroupEntry){
+            .{
                 .binding = 3,
                 .buffer = char_grid_buffer,
                 .offset = 0,
@@ -294,7 +294,7 @@ pub const Renderer = struct {
         };
         const bind_group = c.wgpu_device_create_bind_group(
             device,
-            &(c.WGPUBindGroupDescriptor){
+            &.{
                 .label = "bind group",
                 .layout = bind_group_layout,
                 .entries = &bind_group_entries,
@@ -307,7 +307,7 @@ pub const Renderer = struct {
         // Render pipelines (?!?)
         const pipeline_layout = c.wgpu_device_create_pipeline_layout(
             device,
-            &(c.WGPUPipelineLayoutDescriptor){
+            &.{
                 .bind_group_layouts = &bind_group_layouts,
                 .bind_group_layouts_length = bind_group_layouts.len,
             },
@@ -316,42 +316,42 @@ pub const Renderer = struct {
 
         const render_pipeline = c.wgpu_device_create_render_pipeline(
             device,
-            &(c.WGPURenderPipelineDescriptor){
+            &.{
                 .layout = pipeline_layout,
-                .vertex_stage = (c.WGPUProgrammableStageDescriptor){
+                .vertex_stage = .{
                     .module = vert_shader,
                     .entry_point = "main",
                 },
-                .fragment_stage = &(c.WGPUProgrammableStageDescriptor){
+                .fragment_stage = &.{
                     .module = frag_shader,
                     .entry_point = "main",
                 },
-                .rasterization_state = &(c.WGPURasterizationStateDescriptor){
-                    .front_face = c.WGPUFrontFace._Ccw,
-                    .cull_mode = c.WGPUCullMode._None,
+                .rasterization_state = &.{
+                    .front_face = c.WGPUFrontFace_Ccw,
+                    .cull_mode = c.WGPUCullMode_None,
                     .depth_bias = 0,
                     .depth_bias_slope_scale = 0.0,
                     .depth_bias_clamp = 0.0,
                 },
-                .primitive_topology = c.WGPUPrimitiveTopology._TriangleList,
-                .color_states = &(c.WGPUColorStateDescriptor){
-                    .format = c.WGPUTextureFormat._Bgra8Unorm,
-                    .alpha_blend = (c.WGPUBlendDescriptor){
-                        .src_factor = c.WGPUBlendFactor._One,
-                        .dst_factor = c.WGPUBlendFactor._Zero,
-                        .operation = c.WGPUBlendOperation._Add,
+                .primitive_topology = c.WGPUPrimitiveTopology_TriangleList,
+                .color_states = &.{
+                    .format = c.WGPUTextureFormat_Bgra8Unorm,
+                    .alpha_blend = .{
+                        .src_factor = c.WGPUBlendFactor_One,
+                        .dst_factor = c.WGPUBlendFactor_Zero,
+                        .operation = c.WGPUBlendOperation_Add,
                     },
-                    .color_blend = (c.WGPUBlendDescriptor){
-                        .src_factor = c.WGPUBlendFactor._One,
-                        .dst_factor = c.WGPUBlendFactor._Zero,
-                        .operation = c.WGPUBlendOperation._Add,
+                    .color_blend = .{
+                        .src_factor = c.WGPUBlendFactor_One,
+                        .dst_factor = c.WGPUBlendFactor_Zero,
+                        .operation = c.WGPUBlendOperation_Add,
                     },
                     .write_mask = c.WGPUColorWrite_ALL,
                 },
                 .color_states_length = 1,
                 .depth_stencil_state = null,
-                .vertex_state = (c.WGPUVertexStateDescriptor){
-                    .index_format = c.WGPUIndexFormat._Uint16,
+                .vertex_state = .{
+                    .index_format = c.WGPUIndexFormat_Uint16,
                     .vertex_buffers = null,
                     .vertex_buffers_length = 0,
                 },
@@ -393,7 +393,7 @@ pub const Renderer = struct {
         return out;
     }
 
-    pub fn clear_preview(self: *Self, alloc: *std.mem.Allocator) void {
+    pub fn clear_preview(self: *Self, alloc: std.mem.Allocator) void {
         if (self.preview) |p| {
             p.deinit();
             alloc.destroy(p);
@@ -409,7 +409,7 @@ pub const Renderer = struct {
         self.dt_index = 0;
     }
 
-    pub fn update_preview(self: *Self, alloc: *std.mem.Allocator, s: Shader) !void {
+    pub fn update_preview(self: *Self, alloc: std.mem.Allocator, s: Shader) !void {
         self.clear_preview(alloc);
 
         // Construct a new Preview with our current state
@@ -424,23 +424,23 @@ pub const Renderer = struct {
 
     pub fn update_font_tex(self: *Self, font: *const ft.Atlas) void {
         const tex_size = (c.WGPUExtent3d){
-            .width = @intCast(u32, font.tex_size),
-            .height = @intCast(u32, font.tex_size),
+            .width = @intCast(font.tex_size),
+            .height = @intCast(font.tex_size),
             .depth = 1,
         };
         c.wgpu_queue_write_texture(
             self.queue,
-            &(c.WGPUTextureCopyView){
+            &.{
                 .texture = self.tex,
                 .mip_level = 0,
                 .origin = (c.WGPUOrigin3d){ .x = 0, .y = 0, .z = 0 },
             },
-            @ptrCast([*]const u8, font.tex.ptr),
+            @ptrCast(font.tex.ptr),
             font.tex.len * @sizeOf(u32),
-            &(c.WGPUTextureDataLayout){
+            &.{
                 .offset = 0,
-                .bytes_per_row = @intCast(u32, font.tex_size) * @sizeOf(u32),
-                .rows_per_image = @intCast(u32, font.tex_size) * @sizeOf(u32),
+                .bytes_per_row = @as(u32, @intCast(font.tex_size)) * @sizeOf(u32),
+                .rows_per_image = @as(u32, @intCast(font.tex_size)) * @sizeOf(u32),
             },
             &tex_size,
         );
@@ -473,13 +473,13 @@ pub const Renderer = struct {
         );
 
         const color_attachments = [_]c.WGPURenderPassColorAttachmentDescriptor{
-            (c.WGPURenderPassColorAttachmentDescriptor){
+            .{
                 .attachment = next_texture.view_id,
                 .resolve_target = 0,
-                .channel = (c.WGPUPassChannel_Color){
-                    .load_op = c.WGPULoadOp._Clear,
-                    .store_op = c.WGPUStoreOp._Store,
-                    .clear_value = (c.WGPUColor){
+                .channel = .{
+                    .load_op = c.WGPULoadOp_Clear,
+                    .store_op = c.WGPUStoreOp_Store,
+                    .clear_value = .{
                         .r = 0.0,
                         .g = 0.0,
                         .b = 0.0,
@@ -492,7 +492,7 @@ pub const Renderer = struct {
 
         const rpass = c.wgpu_command_encoder_begin_render_pass(
             cmd_encoder,
-            &(c.WGPURenderPassDescriptor){
+            &.{
                 .color_attachments = &color_attachments,
                 .color_attachments_length = color_attachments.len,
                 .depth_stencil_attachment = null,
@@ -517,8 +517,8 @@ pub const Renderer = struct {
         self.dt_index = (self.dt_index + 1) % self.dt.len;
 
         var dt_local = self.dt;
-        comptime const asc = std.sort.asc(i64);
-        std.sort.sort(i64, dt_local[0..], {}, asc);
+        const asc = std.sort.asc(i64);
+        std.mem.sort(i64, dt_local[0..], {}, asc);
         const dt = dt_local[self.dt.len / 2];
 
         if (dt > 33) {
@@ -529,7 +529,7 @@ pub const Renderer = struct {
         }
     }
 
-    pub fn deinit(self: *Self, alloc: *std.mem.Allocator) void {
+    pub fn deinit(self: *Self, alloc: std.mem.Allocator) void {
         c.wgpu_texture_destroy(self.tex);
         c.wgpu_texture_view_destroy(self.tex_view);
         c.wgpu_sampler_destroy(self.tex_sampler);
@@ -552,7 +552,7 @@ pub const Renderer = struct {
             self.queue,
             self.char_grid_buffer,
             0,
-            @ptrCast([*c]const u8, char_grid.ptr),
+            @ptrCast(char_grid.ptr),
             char_grid.len * @sizeOf(u32),
         );
     }
@@ -561,12 +561,12 @@ pub const Renderer = struct {
         self.swap_chain = c.wgpu_device_create_swap_chain(
             self.device,
             self.surface,
-            &(c.WGPUSwapChainDescriptor){
+            &.{
                 .usage = c.WGPUTextureUsage_OUTPUT_ATTACHMENT,
-                .format = c.WGPUTextureFormat._Bgra8Unorm,
+                .format = c.WGPUTextureFormat_Bgra8Unorm,
                 .width = width,
                 .height = height,
-                .present_mode = c.WGPUPresentMode._Fifo,
+                .present_mode = c.WGPUPresentMode_Fifo,
             },
         );
 
@@ -585,12 +585,13 @@ pub const Renderer = struct {
             self.queue,
             self.uniform_buffer,
             0,
-            @ptrCast([*c]const u8, u),
+            @ptrCast(u),
             @sizeOf(c.fpUniforms),
         );
     }
 };
 
-export fn adapter_cb(received: c.WGPUAdapterId, data: ?*c_void) void {
-    @ptrCast(*c.WGPUAdapterId, @alignCast(8, data)).* = received;
+export fn adapter_cb(received: c.WGPUAdapterId, data: ?*anyopaque) void {
+    const ptr: *c.WGPUAdapterId = @ptrCast(@alignCast(data));
+    ptr.* = received;
 }

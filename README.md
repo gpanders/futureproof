@@ -6,16 +6,18 @@
 [Project homepage](https://mattkeeter.com/projects/futureproof)
 
 ## Building
+
 ### macOS (x86)
-Install `freetype` and `glfw3` through [Homebrew](https://brew.sh):
+
+Install `freetype`, `glfw3`, and `shaderc` through [Homebrew](https://brew.sh):
 ```
-brew install freetype glfw3
+brew install freetype glfw3 shaderc
 ```
 
 Get vendored dependencies:
 ```
 cd futureproof/vendor
-make wgpu shaderc
+make wgpu
 ```
 
 Build using Zig, using a recent [nightly build](https://ziglang.org/download/) (0.7.1, after 2020-12-31)

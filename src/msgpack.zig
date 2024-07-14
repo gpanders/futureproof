@@ -26,7 +26,8 @@ pub const Key = union(enum) {
     }
 
     fn eql(a: Key, b: Key) bool {
-        if (@as(@TagType(Key), a) != b) {
+        const Tag = @typeInfo(Key).Union.tag_type.?;
+        if (@as(Tag, a) != b) {
             return false;
         } else {
             return std.mem.eql(u8, a.bytes(), b.bytes());
@@ -51,9 +52,18 @@ pub const Key = union(enum) {
 pub const KeyValueMap = std.hash_map.HashMap(
     Key,
     Value,
-    Key.hash,
-    Key.eql,
-    std.hash_map.DefaultMaxLoadPercentage,
+    struct {
+        const Self = @This();
+
+        pub fn hash(_: Self, key: Key) u64 {
+            return key.hash();
+        }
+
+        pub fn eql(_: Self, a: Key, b: Key) bool {
+            return a.eql(b);
+        }
+    },
+    std.hash_map.default_max_load_percentage,
 );
 
 pub const Ext = struct {
@@ -67,8 +77,8 @@ pub const Ext = struct {
             var out: u32 = 0;
             var i: u32 = 0;
             while (i < self.data.len) : (i += 1) {
-                const j: u32 = i * 8;
-                out |= @intCast(u32, self.data[i]) << @intCast(u5, j);
+                const j: u5 = @intCast(i * 8);
+                out |= @shlExact(@as(u32, self.data[i]), j);
             }
             return out;
         }
@@ -88,14 +98,14 @@ pub const Value = union(enum) {
     Map: KeyValueMap,
     Ext: Ext,
 
-    pub fn destroy(self: Value, alloc: *std.mem.Allocator) void {
+    pub fn destroy(self: Value, alloc: std.mem.Allocator) void {
         var self_mut = self;
         switch (self_mut) {
             .Map => |map| {
                 var itr = map.iterator();
                 while (itr.next()) |entry| {
-                    entry.key.to_value().destroy(alloc);
-                    entry.value.destroy(alloc);
+                    entry.key_ptr.to_value().destroy(alloc);
+                    entry.value_ptr.destroy(alloc);
                 }
                 self_mut.Map.deinit();
             },
@@ -116,7 +126,7 @@ pub const Value = union(enum) {
         }
     }
 
-    pub fn encode(alloc: *std.mem.Allocator, v: anytype) !Value {
+    pub fn encode(alloc: std.mem.Allocator, v: anytype) !Value {
         const T = @TypeOf(v);
         switch (@typeInfo(T)) {
             .Pointer => |ptr| {
@@ -212,18 +222,18 @@ pub const Value = union(enum) {
             .Int => |i| {
                 switch (i) {
                     // Negative fixnum
-                    -32...-1 => _ = try out.write(&std.mem.toBytes(@intCast(i8, i))),
+                    -32...-1 => _ = try out.write(&std.mem.toBytes(@as(u8, @intCast(i)))),
                     // i8
                     0...std.math.maxInt(i8), std.math.minInt(i8)...-33 => {
                         _ = try out.writeByte(0xd0);
-                        _ = try out.write(&std.mem.toBytes(@intCast(i8, i)));
+                        _ = try out.write(&std.mem.toBytes(@as(i8, @intCast(i))));
                     },
                     // i16
                     (std.math.maxInt(i8) + 1)...std.math.maxInt(i16),
                     std.math.minInt(i16)...(std.math.minInt(i8) - 1),
                     => {
                         _ = try out.writeByte(0xd1);
-                        const j = std.mem.nativeToBig(i16, @intCast(i16, i));
+                        const j = std.mem.nativeToBig(i16, @intCast(i));
                         _ = try out.write(&std.mem.toBytes(j));
                     },
                     // i32
@@ -231,7 +241,7 @@ pub const Value = union(enum) {
                     std.math.minInt(i32)...(std.math.minInt(i16) - 1),
                     => {
                         _ = try out.writeByte(0xd2);
-                        const j = std.mem.nativeToBig(i32, @intCast(i32, i));
+                        const j = std.mem.nativeToBig(i32, @intCast(i));
                         _ = try out.write(&std.mem.toBytes(j));
                     },
                     // i64
@@ -239,7 +249,7 @@ pub const Value = union(enum) {
                     std.math.minInt(i64)...(std.math.minInt(i32) - 1),
                     => {
                         _ = try out.writeByte(0xd3);
-                        const j = std.mem.nativeToBig(i64, @intCast(i64, i));
+                        const j = std.mem.nativeToBig(i64, @intCast(i));
                         _ = try out.write(&std.mem.toBytes(j));
                     },
                 }
@@ -248,28 +258,28 @@ pub const Value = union(enum) {
             .UInt => |u| {
                 switch (u) {
                     // Positive fixnum
-                    0x00...0x7f => _ = try out.write(&std.mem.toBytes(@intCast(u8, u))),
+                    0x00...0x7f => _ = try out.write(&std.mem.toBytes(@as(u8, @intCast(u)))),
                     // u8
                     0x80...std.math.maxInt(u8) => {
                         _ = try out.writeByte(0xcc);
-                        _ = try out.write(&std.mem.toBytes(@intCast(u8, u)));
+                        _ = try out.write(&std.mem.toBytes(@as(u8, @intCast(u))));
                     },
                     // u16
                     (std.math.maxInt(u8) + 1)...std.math.maxInt(u16) => {
                         _ = try out.writeByte(0xcd);
-                        const j = std.mem.nativeToBig(u16, @intCast(u16, u));
+                        const j = std.mem.nativeToBig(u16, @intCast(u));
                         _ = try out.write(&std.mem.toBytes(j));
                     },
                     // u32
                     (std.math.maxInt(u16) + 1)...std.math.maxInt(u32) => {
                         _ = try out.writeByte(0xce);
-                        const j = std.mem.nativeToBig(u32, @intCast(u32, u));
+                        const j = std.mem.nativeToBig(u32, @intCast(u));
                         _ = try out.write(&std.mem.toBytes(j));
                     },
                     // u64
                     (std.math.maxInt(u32) + 1)...std.math.maxInt(u64) => {
                         _ = try out.writeByte(0xcf);
-                        const j = std.mem.nativeToBig(u64, @intCast(u64, u));
+                        const j = std.mem.nativeToBig(u64, @intCast(u));
                         _ = try out.write(&std.mem.toBytes(j));
                     },
                 }
@@ -291,20 +301,20 @@ pub const Value = union(enum) {
             .RawString => |s| {
                 switch (s.len) {
                     0x00...0x1f => {
-                        _ = try out.writeByte(0b101_00000 | @intCast(u8, s.len));
+                        _ = try out.writeByte(0b101_00000 | @as(u8, @intCast(s.len)));
                     },
                     0x20...std.math.maxInt(u8) => {
                         _ = try out.writeByte(0xd9);
-                        _ = try out.writeByte(@intCast(u8, s.len));
+                        _ = try out.writeByte(@intCast(s.len));
                     },
                     std.math.maxInt(u8) + 1...std.math.maxInt(u16) => {
                         _ = try out.writeByte(0xda);
-                        const j = std.mem.nativeToBig(u16, @intCast(u16, s.len));
+                        const j = std.mem.nativeToBig(u16, @intCast(s.len));
                         _ = try out.write(&std.mem.toBytes(j));
                     },
                     std.math.maxInt(u16) + 1...std.math.maxInt(u32) => {
                         _ = try out.writeByte(0xda);
-                        const j = std.mem.nativeToBig(u32, @intCast(u32, s.len));
+                        const j = std.mem.nativeToBig(u32, @intCast(s.len));
                         _ = try out.write(&std.mem.toBytes(j));
                     },
                     else => std.debug.panic(
@@ -319,16 +329,16 @@ pub const Value = union(enum) {
                 switch (d.len) {
                     0x00...std.math.maxInt(u8) => {
                         _ = try out.writeByte(0xc4);
-                        _ = try out.writeByte(@intCast(u8, d.len));
+                        _ = try out.writeByte(@intCast(d.len));
                     },
                     std.math.maxInt(u8) + 1...std.math.maxInt(u16) => {
                         _ = try out.writeByte(0xc5);
-                        const j = std.mem.nativeToBig(u16, @intCast(u16, d.len));
+                        const j = std.mem.nativeToBig(u16, @intCast(d.len));
                         _ = try out.write(&std.mem.toBytes(j));
                     },
                     std.math.maxInt(u16) + 1...std.math.maxInt(u32) => {
                         _ = try out.writeByte(0xc6);
-                        const j = std.mem.nativeToBig(u32, @intCast(u32, d.len));
+                        const j = std.mem.nativeToBig(u32, @intCast(d.len));
                         _ = try out.write(&std.mem.toBytes(j));
                     },
                     else => std.debug.panic(
@@ -342,16 +352,16 @@ pub const Value = union(enum) {
             .Array => |a| {
                 switch (a.len) {
                     0x00...0x0f => {
-                        _ = try out.writeByte(0b1001_0000 | @intCast(u8, a.len));
+                        _ = try out.writeByte(0b1001_0000 | @as(u8, @intCast(a.len)));
                     },
                     0x10...std.math.maxInt(u16) => {
                         _ = try out.writeByte(0xdc);
-                        const j = std.mem.nativeToBig(u16, @intCast(u16, a.len));
+                        const j = std.mem.nativeToBig(u16, @intCast(a.len));
                         _ = try out.write(&std.mem.toBytes(j));
                     },
                     std.math.maxInt(u16) + 1...std.math.maxInt(u32) => {
                         _ = try out.writeByte(0xdd);
-                        const j = std.mem.nativeToBig(u32, @intCast(u32, a.len));
+                        const j = std.mem.nativeToBig(u32, @intCast(a.len));
                         _ = try out.write(&std.mem.toBytes(j));
                     },
                     else => std.debug.panic(
@@ -368,23 +378,23 @@ pub const Value = union(enum) {
                 const count = m.count();
                 switch (count) {
                     0x00...0x0f => {
-                        _ = try out.writeByte(0b1000_0000 | @intCast(u8, count));
+                        _ = try out.writeByte(0b1000_0000 | @as(u8, @intCast(count)));
                     },
                     0x10...std.math.maxInt(u16) => {
                         _ = try out.writeByte(0xde);
-                        const j = std.mem.nativeToBig(u16, @intCast(u16, count));
+                        const j = std.mem.nativeToBig(u16, @intCast(count));
                         _ = try out.write(&std.mem.toBytes(j));
                     },
                     std.math.maxInt(u16) + 1...std.math.maxInt(u32) => {
                         _ = try out.writeByte(0xdf);
-                        const j = std.mem.nativeToBig(u32, @intCast(u32, count));
+                        const j = std.mem.nativeToBig(u32, @intCast(count));
                         _ = try out.write(&std.mem.toBytes(j));
                     },
                 }
                 var itr = m.iterator();
                 while (itr.next()) |entry| {
-                    try entry.key.to_value().serialize(out);
-                    try entry.value.serialize(out);
+                    try entry.key_ptr.to_value().serialize(out);
+                    try entry.value_ptr.serialize(out);
                 }
             },
 
@@ -409,23 +419,23 @@ pub const Value = union(enum) {
 
                     0x00, 0x03, 0x05...0x07, 0x09...0x0f, 0x11...0xff => {
                         _ = try out.writeByte(0xc7);
-                        _ = try out.writeByte(@intCast(u8, count));
+                        _ = try out.writeByte(@intCast(count));
                     },
                     std.math.maxInt(u8) + 1...std.math.maxInt(u16) => {
                         _ = try out.writeByte(0xc8);
-                        const j = std.mem.nativeToBig(u16, @intCast(u16, count));
+                        const j = std.mem.nativeToBig(u16, @intCast(count));
                         _ = try out.write(&std.mem.toBytes(j));
                     },
                     std.math.maxInt(u16) + 1...std.math.maxInt(u32) => {
                         _ = try out.writeByte(0xc9);
-                        const j = std.mem.nativeToBig(u32, @intCast(u32, count));
+                        const j = std.mem.nativeToBig(u32, @intCast(count));
                         _ = try out.write(&std.mem.toBytes(j));
                     },
                     std.math.maxInt(u32) + 1...std.math.maxInt(u64) => {
                         std.debug.panic("Ext data is too large: {}\n", .{count});
                     },
                 }
-                _ = try out.writeByte(@bitCast(u8, e.type));
+                _ = try out.writeByte(@bitCast(e.type));
                 _ = try out.write(e.data);
             },
         }
@@ -445,8 +455,7 @@ fn generic_type(comptime T: type) type {
 }
 
 fn decode_generic(comptime T: type, data: []const u8) !generic_type(T) {
-    var out: T = undefined;
-    @memcpy(@ptrCast([*]u8, &out), data.ptr, @sizeOf(T));
+    var out = std.mem.bytesToValue(T, data);
     if (T != f32 and T != f64) {
         out = std.mem.bigToNative(T, out);
         // TODO: byteswap floats as well?
@@ -454,7 +463,7 @@ fn decode_generic(comptime T: type, data: []const u8) !generic_type(T) {
     return generic_type(T){ .data = out, .offset = @sizeOf(T) };
 }
 
-fn decode_bin(comptime T: type, alloc: *std.mem.Allocator, data: []const u8) !Decoded {
+fn decode_bin(comptime T: type, alloc: std.mem.Allocator, data: []const u8) !Decoded {
     var offset: usize = 0;
     const d = try decode_generic(T, data);
     const n = d.data;
@@ -464,9 +473,9 @@ fn decode_bin(comptime T: type, alloc: *std.mem.Allocator, data: []const u8) !De
     return Decoded{ .data = Value{ .RawData = out }, .offset = offset };
 }
 
-fn decode_fixext(comptime len: u32, alloc: *std.mem.Allocator, data: []const u8) !Decoded {
+fn decode_fixext(comptime len: u32, alloc: std.mem.Allocator, data: []const u8) !Decoded {
     var offset: usize = 0;
-    const t = @bitCast(i8, data[0]);
+    const t: i8 = @bitCast(data[0]);
     offset += 1;
     const buf = try alloc.dupe(u8, data[offset..(offset + len)]);
     return Decoded{
@@ -475,16 +484,16 @@ fn decode_fixext(comptime len: u32, alloc: *std.mem.Allocator, data: []const u8)
     };
 }
 
-fn decode_ext(comptime T: type, alloc: *std.mem.Allocator, data: []const u8) !Decoded {
-    const t = @bitCast(i8, data[0]);
-    var out = try decode_bin(T, alloc, data[1..]);
+fn decode_ext(comptime T: type, alloc: std.mem.Allocator, data: []const u8) !Decoded {
+    const t: i8 = @bitCast(data[0]);
+    const out = try decode_bin(T, alloc, data[1..]);
     return Decoded{
         .data = Value{ .Ext = .{ .type = t, .data = out.data.RawData } },
         .offset = out.offset + 1,
     };
 }
 
-fn decode_array_n(alloc: *std.mem.Allocator, n: usize, data: []const u8) !Decoded {
+fn decode_array_n(alloc: std.mem.Allocator, n: usize, data: []const u8) !Decoded {
     var out = try alloc.alloc(Value, n);
     var j: usize = 0;
     var offset: usize = 0;
@@ -499,7 +508,7 @@ fn decode_array_n(alloc: *std.mem.Allocator, n: usize, data: []const u8) !Decode
     };
 }
 
-fn decode_map_n(alloc: *std.mem.Allocator, n: usize, data: []const u8) !Decoded {
+fn decode_map_n(alloc: std.mem.Allocator, n: usize, data: []const u8) !Decoded {
     var out = KeyValueMap.init(alloc);
     var j: usize = 0;
     var offset: usize = 0;
@@ -518,7 +527,7 @@ fn decode_map_n(alloc: *std.mem.Allocator, n: usize, data: []const u8) !Decoded 
     };
 }
 
-fn decode_array(comptime T: type, alloc: *std.mem.Allocator, data: []const u8) !Decoded {
+fn decode_array(comptime T: type, alloc: std.mem.Allocator, data: []const u8) !Decoded {
     const d = try decode_generic(T, data);
     const n = d.data;
     const out = try decode_array_n(alloc, n, data[d.offset..]);
@@ -528,7 +537,7 @@ fn decode_array(comptime T: type, alloc: *std.mem.Allocator, data: []const u8) !
     };
 }
 
-fn decode_map(comptime T: type, alloc: *std.mem.Allocator, data: []const u8) !Decoded {
+fn decode_map(comptime T: type, alloc: std.mem.Allocator, data: []const u8) !Decoded {
     const d = try decode_generic(T, data);
     const n = d.data;
     const out = try decode_map_n(alloc, n, data[d.offset..]);
@@ -538,11 +547,11 @@ fn decode_map(comptime T: type, alloc: *std.mem.Allocator, data: []const u8) !De
     };
 }
 
-pub fn decode(alloc: *std.mem.Allocator, data: []const u8) anyerror!Decoded {
+pub fn decode(alloc: std.mem.Allocator, data: []const u8) anyerror!Decoded {
     const c = data[0];
     var offset: usize = 1;
     const t = switch (c) {
-        0x00...0x7f => Value{ .UInt = @intCast(u64, c & 0x7F) },
+        0x00...0x7f => Value{ .UInt = @intCast(c & 0x7F) },
 
         0x80...0x8f => fixmap: {
             const n = c & 0xF;
@@ -560,7 +569,7 @@ pub fn decode(alloc: *std.mem.Allocator, data: []const u8) anyerror!Decoded {
 
         0xa0...0xbf => fixstr: {
             const n = c & 0x1F;
-            var out = try alloc.dupe(u8, data[offset..(offset + n)]);
+            const out = try alloc.dupe(u8, data[offset..(offset + n)]);
             offset += n;
             break :fixstr Value{ .RawString = out };
         },
@@ -713,7 +722,7 @@ pub fn decode(alloc: *std.mem.Allocator, data: []const u8) anyerror!Decoded {
             break :map32 n.data;
         },
 
-        0xe0...0xff => Value{ .Int = @bitCast(i8, c) },
+        0xe0...0xff => Value{ .Int = @intCast(c) },
 
         else => Value{ .Nil = {} },
     };
@@ -728,8 +737,8 @@ pub fn decode(alloc: *std.mem.Allocator, data: []const u8) anyerror!Decoded {
 test "msgpack.Value.encode string literal" {
     var gp_alloc = std.heap.GeneralPurposeAllocator(.{}){};
     defer std.testing.expect(!gp_alloc.deinit());
-    var arena = std.heap.ArenaAllocator.init(&gp_alloc.allocator);
-    const alloc: *std.mem.Allocator = &arena.allocator;
+    var arena = std.heap.ArenaAllocator.init(gp_alloc.allocator());
+    const alloc = arena.allocator();
     defer arena.deinit();
 
     const v = try Value.encode(alloc, "hello");
