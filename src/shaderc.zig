@@ -31,13 +31,13 @@ fn status_to_err(i: c_int) CompilationError {
     }
 }
 
-export fn include_cb(user_data: ?*anyopaque, requested_source: [*c]const u8, _: c_int, _: [*c]const u8, _: usize) *c.shaderc_include_result {
-    const alloc: *const std.mem.Allocator = @fieldParentPtr("ptr", &user_data.?);
+export fn include_cb(userdata: ?*anyopaque, requested_source: [*c]const u8, _: c_int, _: [*c]const u8, _: usize) *c.shaderc_include_result {
+    const alloc: *const std.mem.Allocator = @fieldParentPtr("ptr", &userdata.?);
     var out = alloc.create(c.shaderc_include_result) catch |err| {
         std.debug.panic("Could not allocate shaderc_include_result: {}", .{err});
     };
     out.* = (c.shaderc_include_result){
-        .user_data = user_data,
+        .user_data = userdata,
         .source_name = "",
         .source_name_length = 0,
         .content = null,
@@ -55,13 +55,7 @@ export fn include_cb(user_data: ?*anyopaque, requested_source: [*c]const u8, _: 
         return out;
     };
 
-    const size = file.getEndPos() catch |err| {
-        std.debug.panic("Could not get end position of file: {}", .{err});
-    };
-    const buf = alloc.alloc(u8, size) catch |err| {
-        std.debug.panic("Could not allocate space for data: {}", .{err});
-    };
-    _ = file.readAll(buf) catch |err| {
+    const buf = file.reader().readAllAlloc(alloc.*, std.math.maxInt(u32)) catch |err| {
         std.debug.panic("Could not read header: {}", .{err});
     };
 
@@ -72,21 +66,22 @@ export fn include_cb(user_data: ?*anyopaque, requested_source: [*c]const u8, _: 
     return out;
 }
 
-export fn include_release_cb(user_data: ?*anyopaque, include_result: ?*c.shaderc_include_result) void {
+export fn include_release_cb(userdata: ?*anyopaque, include_result: ?*c.shaderc_include_result) void {
     if (include_result != null) {
-        const alloc: *const std.mem.Allocator = @fieldParentPtr("ptr", &user_data.?);
+        const alloc: *const std.mem.Allocator = @fieldParentPtr("ptr", &userdata.?);
         const r: *c.shaderc_include_result = @ptrCast(include_result);
         alloc.free(r.content[0..r.content_length]);
         alloc.destroy(r);
     }
 }
 
-pub fn build_shader_from_file(alloc: std.mem.Allocator, comptime name: []const u8) ![]u32 {
-    const buf = try util.file_contents(alloc, name);
-    return build_shader(alloc, name, buf);
+pub fn build_shader_from_file(arena: *std.heap.ArenaAllocator, comptime name: []const u8) ![]u32 {
+    const buf = try util.file_contents(arena, name);
+    return build_shader(arena, name, buf);
 }
 
-pub fn build_shader(alloc: std.mem.Allocator, name: []const u8, src: []const u8) ![]u32 {
+pub fn build_shader(arena: *std.heap.ArenaAllocator, name: []const u8, src: []const u8) ![]u32 {
+    const alloc = arena.allocator();
     const compiler = c.shaderc_compiler_initialize();
     defer c.shaderc_compiler_release(compiler);
 
@@ -162,14 +157,13 @@ pub fn build_preview_shader(
     // Load the standard fragment shader prelude from a file
     // (or embed in the source if this is a release build)
     var arena = std.heap.ArenaAllocator.init(alloc);
-    var tmp_alloc = arena.allocator();
     defer arena.deinit();
     const prelude = try util.file_contents(
-        tmp_alloc,
+        &arena,
         "shaders/preview.prelude.frag",
     );
 
-    const full_src = try tmp_alloc.alloc(u8, prelude.len + src.len);
+    const full_src = try arena.allocator().alloc(u8, prelude.len + src.len);
     @memcpy(full_src, prelude);
     @memcpy(full_src[prelude.len..], src);
 
@@ -205,7 +199,7 @@ pub fn build_preview_shader(
         // Copy the error out of the shader
         const err_msg = c.shaderc_result_get_error_message(result);
         const len = std.mem.len(err_msg);
-        const out = try tmp_alloc.alloc(u8, len);
+        const out = try arena.allocator().alloc(u8, len);
         @memcpy(out[0..len], err_msg[0..len]);
 
         // Prase out individual lines of the error message, figuring out

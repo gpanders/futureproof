@@ -6,15 +6,15 @@ const shaderc = @import("shaderc.zig");
 pub const Blit = struct {
     const Self = @This();
 
-    device: c.WGPUDeviceId,
+    device: c.WGPUDevice,
 
-    bind_group_layout: c.WGPUBindGroupLayoutId,
-    tex_sampler: c.WGPUSamplerId,
-    bind_group: ?c.WGPUBindGroupId,
+    bind_group_layout: c.WGPUBindGroupLayout,
+    tex_sampler: c.WGPUSampler,
+    bind_group: ?c.WGPUBindGroup,
 
-    render_pipeline: c.WGPURenderPipelineId,
+    render_pipeline: c.WGPURenderPipeline,
 
-    pub fn init(alloc: std.mem.Allocator, device: c.WGPUDeviceId) !Blit {
+    pub fn init(alloc: std.mem.Allocator, device: c.WGPUDevice) !Blit {
         var arena = std.heap.ArenaAllocator.init(alloc);
         const tmp_alloc = arena.allocator();
         defer arena.deinit();
@@ -24,30 +24,40 @@ pub const Blit = struct {
         const vert_spv = shaderc.build_shader_from_file(tmp_alloc, "shaders/blit.vert") catch {
             std.debug.panic("Could not open file", .{});
         };
-        const vert_shader = c.wgpu_device_create_shader_module(
+        const vert_shader = c.wgpuDeviceCreateShaderModule(
             device,
-            (c.WGPUShaderSource){
-                .bytes = vert_spv.ptr,
-                .length = vert_spv.len,
+            &.{
+                .nextInChain = @ptrCast(&c.WGPUShaderModuleSPIRVDescriptor{
+                    .chain = .{
+                        .sType = c.WGPUSType_ShaderModuleSPIRVDescriptor,
+                    },
+                    .code = vert_spv.ptr,
+                    .codeSize = @intCast(vert_spv.len),
+                }),
             },
         );
-        defer c.wgpu_shader_module_destroy(vert_shader);
+        defer c.wgpuShaderModuleRelease(vert_shader);
 
         const frag_spv = shaderc.build_shader_from_file(tmp_alloc, "shaders/blit.frag") catch {
             std.debug.panic("Could not open file", .{});
         };
-        const frag_shader = c.wgpu_device_create_shader_module(
+        const frag_shader = c.wgpuDeviceCreateShaderModule(
             device,
-            (c.WGPUShaderSource){
-                .bytes = frag_spv.ptr,
-                .length = frag_spv.len,
+            &.{
+                .nextInChain = @ptrCast(&c.WGPUShaderModuleSPIRVDescriptor{
+                    .chain = .{
+                        .sType = c.WGPUSType_ShaderModuleSPIRVDescriptor,
+                    },
+                    .code = frag_spv.ptr,
+                    .codeSize = @intCast(frag_spv.len),
+                }),
             },
         );
-        defer c.wgpu_shader_module_destroy(frag_shader);
+        defer c.wgpuShaderModuleRelease(frag_shader);
 
         ///////////////////////////////////////////////////////////////////////
         // Texture sampler (the texture comes from the Preview struct)
-        const tex_sampler = c.wgpu_device_create_sampler(device, &(c.WGPUSamplerDescriptor){
+        const tex_sampler = c.wgpuDeviceCreateSampler(device, &(c.WGPUSamplerDescriptor){
             .next_in_chain = null,
             .label = "font_atlas_sampler",
             .address_mode_u = c.WGPUAddressMode_ClampToEdge,
@@ -92,7 +102,7 @@ pub const Blit = struct {
                 .min_buffer_binding_size = undefined,
             },
         };
-        const bind_group_layout = c.wgpu_device_create_bind_group_layout(
+        const bind_group_layout = c.wgpuDeviceCreateBindGroupLayout(
             device,
             &(c.WGPUBindGroupLayoutDescriptor){
                 .label = "bind group layout",
@@ -100,20 +110,20 @@ pub const Blit = struct {
                 .entries_length = bind_group_layout_entries.len,
             },
         );
-        const bind_group_layouts = [_]c.WGPUBindGroupId{bind_group_layout};
+        const bind_group_layouts = [_]c.WGPUBindGroup{bind_group_layout};
 
         ////////////////////////////////////////////////////////////////////////////
         // Render pipelines
-        const pipeline_layout = c.wgpu_device_create_pipeline_layout(
+        const pipeline_layout = c.wgpuDeviceCreatePipelineLayout(
             device,
             &(c.WGPUPipelineLayoutDescriptor){
                 .bind_group_layouts = &bind_group_layouts,
                 .bind_group_layouts_length = bind_group_layouts.len,
             },
         );
-        defer c.wgpu_pipeline_layout_destroy(pipeline_layout);
+        defer c.wgpuPipelineLayoutRelease(pipeline_layout);
 
-        const render_pipeline = c.wgpu_device_create_render_pipeline(
+        const render_pipeline = c.wgpuDeviceCreateRenderPipeline(
             device,
             &(c.WGPURenderPipelineDescriptor){
                 .layout = pipeline_layout,
@@ -169,9 +179,9 @@ pub const Blit = struct {
         };
     }
 
-    pub fn bind_to_tex(self: *Self, tex_view: c.WGPUTextureViewId) void {
+    pub fn bind_to_tex(self: *Self, tex_view: c.WGPUTextureView) void {
         if (self.bind_group) |b| {
-            c.wgpu_bind_group_destroy(b);
+            c.wgpuBindGroupRelease(b);
         }
         const bind_group_entries = [_]c.WGPUBindGroupEntry{
             (c.WGPUBindGroupEntry){
@@ -193,7 +203,7 @@ pub const Blit = struct {
                 .size = undefined,
             },
         };
-        self.bind_group = c.wgpu_device_create_bind_group(
+        self.bind_group = c.wgpuDeviceCreateBindGroup(
             self.device,
             &(c.WGPUBindGroupDescriptor){
                 .label = "bind group",
@@ -205,17 +215,17 @@ pub const Blit = struct {
     }
 
     pub fn deinit(self: *Self) void {
-        c.wgpu_sampler_destroy(self.tex_sampler);
-        c.wgpu_bind_group_layout_destroy(self.bind_group_layout);
+        c.wgpuSamplerRelease(self.tex_sampler);
+        c.wgpuBindGroupLayoutRelease(self.bind_group_layout);
         if (self.bind_group) |b| {
-            c.wgpu_bind_group_destroy(b);
+            c.wgpuBindGroupRelease(b);
         }
     }
 
     pub fn redraw(
         self: *Self,
         next_texture: c.WGPUSwapChainOutput,
-        cmd_encoder: c.WGPUCommandEncoderId,
+        cmd_encoder: c.WGPUCommandEncoder,
     ) void {
         const color_attachments = [_]c.WGPURenderPassColorAttachmentDescriptor{
             (c.WGPURenderPassColorAttachmentDescriptor){
@@ -235,7 +245,7 @@ pub const Blit = struct {
             },
         };
 
-        const rpass = c.wgpu_command_encoder_begin_render_pass(
+        const rpass = c.wgpuCommandEncoderBeginRenderPass(
             cmd_encoder,
             &(c.WGPURenderPassDescriptor){
                 .color_attachments = &color_attachments,
@@ -244,13 +254,12 @@ pub const Blit = struct {
             },
         );
 
-        c.wgpu_render_pass_set_pipeline(rpass, self.render_pipeline);
+        c.wgpuRenderPassEncoderSetPipeline(rpass, self.render_pipeline);
         const b = self.bind_group orelse std.debug.panic(
             "Tried to blit preview before texture was bound",
             .{},
         );
-        c.wgpu_render_pass_set_bind_group(rpass, 0, b, null, 0);
-        c.wgpu_render_pass_draw(rpass, 6, 1, 0, 0);
-        c.wgpu_render_pass_end_pass(rpass);
+        c.wgpuRenderPassEncoderSetBindGroup(rpass, 0, b, null, 0);
+        c.wgpuRenderPassEncoderDraw(rpass, 6, 1, 0, 0);
     }
 };

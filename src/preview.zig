@@ -6,18 +6,18 @@ const shaderc = @import("shaderc.zig");
 pub const Preview = struct {
     const Self = @This();
 
-    device: c.WGPUDeviceId,
-    queue: c.WGPUQueueId,
+    device: c.WGPUDevice,
+    queue: c.WGPUQueue,
 
     // We render into tex[0] in tiles to keep up a good framerate, then
     // copy to tex[1] to render the complete image without tearing
-    tex: [2]c.WGPUTextureId,
-    tex_view: [2]c.WGPUTextureViewId,
-    tex_size: c.WGPUExtent3d,
+    tex: [2]c.WGPUTexture,
+    tex_view: [2]c.WGPUTextureView,
+    tex_size: c.WGPUExtent3D,
 
-    bind_group: c.WGPUBindGroupId,
-    uniform_buffer: c.WGPUBufferId,
-    render_pipeline: c.WGPURenderPipelineId,
+    bind_group: c.WGPUBindGroup,
+    uniform_buffer: c.WGPUBuffer,
+    render_pipeline: c.WGPURenderPipeline,
 
     start_time: i64,
     uniforms: c.fpPreviewUniforms,
@@ -25,38 +25,48 @@ pub const Preview = struct {
 
     pub fn init(
         alloc: std.mem.Allocator,
-        device: c.WGPUDeviceId,
+        device: c.WGPUDevice,
         frag: []const u32,
         draw_continuously: bool,
     ) !Preview {
         var arena = std.heap.ArenaAllocator.init(alloc);
-        const tmp_alloc = arena.allocator();
         defer arena.deinit();
 
         // Build the shaders using shaderc
-        const vert_spv = shaderc.build_shader_from_file(tmp_alloc, "shaders/preview.vert") catch {
+        const vert_spv = shaderc.build_shader_from_file(&arena, "shaders/preview.vert") catch {
             std.debug.panic("Could not build preview.vert", .{});
         };
-        const vert_shader = c.wgpu_device_create_shader_module(
+        const vert_shader = c.wgpuDeviceCreateShaderModule(
             device,
-            .{
-                .bytes = vert_spv.ptr,
-                .length = vert_spv.len,
+            &.{
+                .nextInChain = @ptrCast(&c.WGPUShaderModuleSPIRVDescriptor{
+                    .chain = .{
+                        .sType = c.WGPUSType_ShaderModuleSPIRVDescriptor,
+                    },
+                    .code = vert_spv.ptr,
+                    .codeSize = @intCast(vert_spv.len),
+                }),
             },
         );
-        defer c.wgpu_shader_module_destroy(vert_shader);
-        const frag_shader = c.wgpu_device_create_shader_module(
+        defer c.wgpuShaderModuleRelease(vert_shader);
+
+        const frag_shader = c.wgpuDeviceCreateShaderModule(
             device,
-            .{
-                .bytes = frag.ptr,
-                .length = frag.len,
+            &.{
+                .nextInChain = @ptrCast(&c.WGPUShaderModuleSPIRVDescriptor{
+                    .chain = .{
+                        .sType = c.WGPUSType_ShaderModuleSPIRVDescriptor,
+                    },
+                    .code = frag.ptr,
+                    .codeSize = @intCast(frag.len),
+                }),
             },
         );
-        defer c.wgpu_shader_module_destroy(frag_shader);
+        defer c.wgpuShaderModuleRelease(frag_shader);
 
         ////////////////////////////////////////////////////////////////////////////////
         // Uniform buffers
-        const uniform_buffer = c.wgpu_device_create_buffer(
+        const uniform_buffer = c.wgpuDeviceCreateBuffer(
             device,
             &.{
                 .label = "Uniforms",
@@ -83,7 +93,7 @@ pub const Preview = struct {
                 .count = undefined,
             },
         };
-        const bind_group_layout = c.wgpu_device_create_bind_group_layout(
+        const bind_group_layout = c.wgpuDeviceCreateBindGroupLayout(
             device,
             &.{
                 .label = "bind group layout",
@@ -91,7 +101,7 @@ pub const Preview = struct {
                 .entries_length = bind_group_layout_entries.len,
             },
         );
-        defer c.wgpu_bind_group_layout_destroy(bind_group_layout);
+        defer c.wgpuBindGroupLayoutRelease(bind_group_layout);
         const bind_group_entries = [_]c.WGPUBindGroupEntry{
             .{
                 .binding = 0,
@@ -103,7 +113,7 @@ pub const Preview = struct {
                 .texture_view = 0, // None
             },
         };
-        const bind_group = c.wgpu_device_create_bind_group(
+        const bind_group = c.wgpuDeviceCreateBindGroup(
             device,
             &.{
                 .label = "bind group",
@@ -112,69 +122,71 @@ pub const Preview = struct {
                 .entries_length = bind_group_entries.len,
             },
         );
-        const bind_group_layouts = [_]c.WGPUBindGroupId{bind_group_layout};
+        const bind_group_layouts = [_]c.WGPUBindGroup{bind_group_layout};
 
         // Render pipelines (?!?)
-        const pipeline_layout = c.wgpu_device_create_pipeline_layout(
+        const pipeline_layout = c.wgpuDeviceCreatePipelineLayout(
             device,
             &.{
                 .bind_group_layouts = &bind_group_layouts,
                 .bind_group_layouts_length = bind_group_layouts.len,
             },
         );
-        defer c.wgpu_pipeline_layout_destroy(pipeline_layout);
+        defer c.wgpuPipelineLayoutRelease(pipeline_layout);
 
-        const render_pipeline = c.wgpu_device_create_render_pipeline(
+        const render_pipeline = c.wgpuDeviceCreateRenderPipeline(
             device,
             &.{
                 .layout = pipeline_layout,
-                .vertex_stage = .{
+                .vertex = .{
                     .module = vert_shader,
-                    .entry_point = "main",
+                    .entryPoint = "main",
                 },
-                .fragment_stage = &.{
+                .fragment = &.{
                     .module = frag_shader,
-                    .entry_point = "main",
+                    .entryPoint = "main",
+                    .targetCount = 1,
+                    .targets = &.{
+                        .format = c.WGPUTextureFormat_Bgra8Unorm,
+                        .blend = &.{
+                            .color = .{
+                                .operation = c.WGPUBlendOperation_Add,
+                                .srcFactor = c.WGPUBlendFactor_One,
+                                .dstFactor = c.WGPUBlendFactor_Zero,
+                            },
+                            .alpha = .{
+                                .operation = c.WGPUBlendOperation_Add,
+                                .srcFactor = c.WGPUBlendFactor_One,
+                                .dstFactor = c.WGPUBlendFactor_Zero,
+                            },
+                        },
+                        .writeMask = c.WGPUColorWrite_ALL,
+                    },
                 },
-                .rasterization_state = &.{
-                    .front_face = c.WGPUFrontFace_Ccw,
-                    .cull_mode = c.WGPUCullMode_None,
-                    .depth_bias = 0,
-                    .depth_bias_slope_scale = 0.0,
-                    .depth_bias_clamp = 0.0,
-                },
-                .primitive_topology = c.WGPUPrimitiveTopology_TriangleList,
-                .color_states = &.{
+                .depthStencil = &.{
                     .format = c.WGPUTextureFormat_Bgra8Unorm,
-                    .alpha_blend = .{
-                        .src_factor = c.WGPUBlendFactor_One,
-                        .dst_factor = c.WGPUBlendFactor_Zero,
-                        .operation = c.WGPUBlendOperation_Add,
-                    },
-                    .color_blend = .{
-                        .src_factor = c.WGPUBlendFactor_One,
-                        .dst_factor = c.WGPUBlendFactor_Zero,
-                        .operation = c.WGPUBlendOperation_Add,
-                    },
-                    .write_mask = c.WGPUColorWrite_ALL,
+                    .depthBias = 0,
+                    .depthBiasSlopeScale = 0.0,
+                    .depthBiasClamp = 0.0,
                 },
-                .color_states_length = 1,
-                .depth_stencil_state = null,
-                .vertex_state = .{
-                    .index_format = c.WGPUIndexFormat_Uint16,
-                    .vertex_buffers = null,
-                    .vertex_buffers_length = 0,
+                .primitive = .{
+                    .topology = c.WGPUPrimitiveTopology_TriangleList,
+                    .stripIndexFormat = c.WGPUIndexFormat_Uint16,
+                    .frontFace = c.WGPUFrontFace_Ccw,
+                    .cullMode = c.WGPUCullMode_None,
                 },
-                .sample_count = 1,
-                .sample_mask = 0,
-                .alpha_to_coverage_enabled = false,
+                .multisample = .{
+                    .count = 1,
+                    .mask = 0,
+                    .alphaToCoverageEnabled = false,
+                },
             },
         );
 
         const start_time = std.time.milliTimestamp();
         return Self{
             .device = device,
-            .queue = c.wgpu_device_get_default_queue(device),
+            .queue = c.wgpuDeviceGetDefaultQueue(device),
 
             .render_pipeline = render_pipeline,
             .uniform_buffer = uniform_buffer,
@@ -202,10 +214,10 @@ pub const Preview = struct {
         // If the texture was created, then destroy it
         if (self.uniforms.iResolution.x != 0) {
             for (self.tex) |t| {
-                c.wgpu_texture_destroy(t);
+                c.wgpuTextureRelease(t);
             }
             for (self.tex_view) |t| {
-                c.wgpu_texture_view_destroy(t);
+                c.wgpuTextureViewRelease(t);
             }
         }
     }
@@ -230,9 +242,9 @@ pub const Preview = struct {
     }
 
     pub fn deinit(self: *const Self) void {
-        c.wgpu_bind_group_destroy(self.bind_group);
-        c.wgpu_buffer_destroy(self.uniform_buffer);
-        c.wgpu_render_pipeline_destroy(self.render_pipeline);
+        c.wgpuBindGroupRelease(self.bind_group);
+        c.wgpuBufferRelease(self.uniform_buffer);
+        c.wgpuRenderPipelineRelease(self.render_pipeline);
         self.destroy_textures();
     }
 
@@ -242,12 +254,12 @@ pub const Preview = struct {
         self.tex_size = .{
             .width = @intCast(width / 2),
             .height = @intCast(height),
-            .depth = 1,
+            .depthOrArrayLayers = 1,
         };
 
         var i: u8 = 0;
         while (i < 2) : (i += 1) {
-            self.tex[i] = c.wgpu_device_create_texture(
+            self.tex[i] = c.wgpuDeviceCreateTexture(
                 self.device,
                 &.{
                     .size = self.tex_size,
@@ -270,7 +282,7 @@ pub const Preview = struct {
                 },
             );
 
-            self.tex_view[i] = c.wgpu_texture_create_view(
+            self.tex_view[i] = c.wgpuTextureCreateView(
                 self.tex[i],
                 &.{
                     .label = "preview_tex_view",
@@ -290,7 +302,7 @@ pub const Preview = struct {
     }
 
     pub fn redraw(self: *Self) void {
-        const cmd_encoder = c.wgpu_device_create_command_encoder(
+        const cmd_encoder = c.wgpuDeviceCreateCommandEncoder(
             self.device,
             &.{ .label = "preview encoder" },
         );
@@ -301,7 +313,7 @@ pub const Preview = struct {
             self.uniforms.iTime = @as(f32, @floatFromInt(time_ms)) / 1000.0;
         }
 
-        c.wgpu_queue_write_buffer(
+        c.wgpuQueueWriteBuffer(
             self.queue,
             self.uniform_buffer,
             0,
@@ -331,7 +343,7 @@ pub const Preview = struct {
             },
         };
 
-        const rpass = c.wgpu_command_encoder_begin_render_pass(
+        const rpass = c.wgpuCommandEncoderBeginRenderPass(
             cmd_encoder,
             &.{
                 .color_attachments = &color_attachments,
@@ -340,10 +352,9 @@ pub const Preview = struct {
             },
         );
 
-        c.wgpu_render_pass_set_pipeline(rpass, self.render_pipeline);
-        c.wgpu_render_pass_set_bind_group(rpass, 0, self.bind_group, null, 0);
-        c.wgpu_render_pass_draw(rpass, 6, 1, 0, 0);
-        c.wgpu_render_pass_end_pass(rpass);
+        c.wgpuRenderPassEncoderSetPipeline(rpass, self.render_pipeline);
+        c.wgpuRenderPassEncoderSetBindGroup(rpass, 0, self.bind_group, null, 0);
+        c.wgpuRenderPassEncoderDraw(rpass, 6, 1, 0, 0);
 
         // Move on to the next tile
         if (self.uniforms._tiles_per_side > 1) {
@@ -363,7 +374,7 @@ pub const Preview = struct {
                 .mip_level = 0,
                 .origin = .{ .x = 0, .y = 0, .z = 0 },
             };
-            c.wgpu_command_encoder_copy_texture_to_texture(
+            c.wgpuCommandEncoderCopyTextureToTexture(
                 cmd_encoder,
                 &src,
                 &dst,
@@ -372,7 +383,7 @@ pub const Preview = struct {
             self.uniforms._tile_num = 0;
         }
 
-        const cmd_buf = c.wgpu_command_encoder_finish(cmd_encoder, null);
-        c.wgpu_queue_submit(self.queue, &cmd_buf, 1);
+        const cmd_buf = c.wgpuCommandEncoderFinish(cmd_encoder, null);
+        c.wgpuQueueSubmit(self.queue, &cmd_buf, 1);
     }
 };

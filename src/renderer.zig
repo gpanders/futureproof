@@ -9,27 +9,34 @@ const Blit = @import("blit.zig").Blit;
 const Preview = @import("preview.zig").Preview;
 const Shader = @import("shaderc.zig").Shader;
 
+const AsyncContext = struct {
+    data: *anyopaque,
+    event: *std.Thread.ResetEvent,
+};
+
 pub const Renderer = struct {
     const Self = @This();
 
-    tex: c.WGPUTextureId,
-    tex_view: c.WGPUTextureViewId,
-    tex_sampler: c.WGPUSamplerId,
+    instance: c.WGPUInstanceDescriptor,
+    adapter: c.WGPUAdapter,
 
-    swap_chain: c.WGPUSwapChainId,
+    tex: c.WGPUTexture,
+    tex_view: c.WGPUTextureView,
+    tex_sampler: c.WGPUSampler,
+
     width: u32,
     height: u32,
 
-    device: c.WGPUDeviceId,
-    surface: c.WGPUSurfaceId,
+    device: c.WGPUDevice,
+    surface: c.WGPUSurface,
 
-    queue: c.WGPUQueueId,
+    queue: c.WGPUQueue,
 
-    bind_group: c.WGPUBindGroupId,
-    uniform_buffer: c.WGPUBufferId,
-    char_grid_buffer: c.WGPUBufferId,
+    bind_group: c.WGPUBindGroup,
+    uniform_buffer: c.WGPUBuffer,
+    char_grid_buffer: c.WGPUBuffer,
 
-    render_pipeline: c.WGPURenderPipelineId,
+    render_pipeline: c.WGPURenderPipeline,
 
     preview: ?*Preview,
     blit: Blit,
@@ -39,91 +46,147 @@ pub const Renderer = struct {
     dt: [5]i64,
     dt_index: usize,
 
-    pub fn init(alloc: std.mem.Allocator, window: *c.GLFWwindow, font: *const ft.Atlas) !Self {
+    pub fn init(alloc: std.mem.Allocator, window: *c.GLFWwindow, atlas: *const ft.Atlas) !Self {
         var arena = std.heap.ArenaAllocator.init(alloc);
-        const tmp_alloc = arena.allocator();
         defer arena.deinit();
+
+        const desc: c.WGPUInstanceDescriptor = .{};
+        const instance = c.wgpuCreateInstance(&desc);
 
         // Extract the WGPU Surface from the platform-specific window
         const platform = builtin.os.tag;
-        const surface = if (platform == .macos) surf: {
-            // Time to do hilarious Objective-C runtime hacks, equivalent to
-            //  [ns_window.contentView setWantsLayer:YES];
-            //  id metal_layer = [CAMetalLayer layer];
-            //  [ns_window.contentView setLayer:metal_layer];
-            const objc = @import("objc.zig");
-            const darwin = @import("darwin.zig");
+        const surface = switch (builtin.os.tag) {
+            .macos => macos: {
+                // Time to do hilarious Objective-C runtime hacks, equivalent to
+                //  [ns_window.contentView setWantsLayer:YES];
+                //  id metal_layer = [CAMetalLayer layer];
+                //  [ns_window.contentView setLayer:metal_layer];
+                const objc = @import("objc.zig");
+                const darwin = @import("darwin.zig");
 
-            const cocoa_window = darwin.glfwGetCocoaWindow(window);
-            const ns_window: c.id = @ptrCast(@alignCast(cocoa_window));
+                const cocoa_window = darwin.glfwGetCocoaWindow(window);
+                const ns_window: c.id = @ptrCast(@alignCast(cocoa_window));
 
-            const cv = objc.call(ns_window, "contentView");
-            _ = objc.call_(cv, "setWantsLayer:", true);
+                const cv = objc.call(ns_window, "contentView");
+                _ = objc.call_(cv, "setWantsLayer:", true);
 
-            const ca_metal = objc.class("CAMetalLayer");
-            const metal_layer = objc.call(ca_metal, "layer");
+                const ca_metal = objc.class("CAMetalLayer");
+                const metal_layer = objc.call(ca_metal, "layer");
 
-            _ = objc.call_(cv, "setLayer:", metal_layer);
+                _ = objc.call_(cv, "setLayer:", metal_layer);
 
-            break :surf c.wgpu_create_surface_from_metal_layer(metal_layer);
-        } else {
-            std.debug.panic("Unimplemented on platform {}", .{platform});
+                break :macos c.wgpuInstanceCreateSurface(
+                    instance,
+                    &.{
+                        .nextInChain = @ptrCast(&c.WGPUSurfaceDescriptorFromMetalLayer{
+                            .chain = .{
+                                .sType = c.WGPUSType_SurfaceDescriptorFromMetalLayer,
+                            },
+                            .layer = metal_layer,
+                        }),
+                    },
+                );
+            },
+            else => {
+                std.debug.panic("Unimplemented on platform {}", .{platform});
+            },
         };
 
         ////////////////////////////////////////////////////////////////////////////
         // WGPU initial setup
-        var adapter: c.WGPUAdapterId = 0;
-        c.wgpu_request_adapter_async(&(c.WGPURequestAdapterOptions){
-            .power_preference = c.WGPUPowerPreference_HighPerformance,
-            .compatible_surface = surface,
-        }, 2 | 4 | 8, false, adapter_cb, &adapter);
+        var adapter: c.WGPUAdapter = null;
 
-        const device = c.wgpu_adapter_request_device(
-            adapter,
-            0,
-            &.{
-                .max_bind_groups = 1,
-            },
-            true,
-            null,
-        );
+        {
+            var event: std.Thread.ResetEvent = .{};
+            var ctx: AsyncContext = .{
+                .data = @ptrCast(&adapter),
+                .event = &event,
+            };
+
+            c.wgpuInstanceRequestAdapter(
+                instance,
+                &.{
+                    .powerPreference = c.WGPUPowerPreference_HighPerformance,
+                    .compatibleSurface = surface,
+                },
+                handleRequestAdapter,
+                &ctx,
+            );
+
+            event.wait();
+        }
+
+        var device: c.WGPUDevice = null;
+
+        {
+            var event: std.Thread.ResetEvent = .{};
+            var ctx: AsyncContext = .{
+                .data = @ptrCast(&device),
+                .event = &event,
+            };
+
+            c.wgpuAdapterRequestDevice(
+                adapter,
+                &.{
+                    .requiredLimits = &.{
+                        .limits = .{
+                            .maxBindGroups = 1,
+                        },
+                    },
+                },
+                handleRequestDevice,
+                &ctx,
+            );
+
+            event.wait();
+        }
 
         ////////////////////////////////////////////////////////////////////////////
         // Build the shaders using shaderc
-        const vert_spv = try shaderc.build_shader_from_file(tmp_alloc, "shaders/grid.vert");
-        const vert_shader = c.wgpu_device_create_shader_module(
+        const vert_spv = try shaderc.build_shader_from_file(&arena, "shaders/grid.vert");
+        const vert_shader = c.wgpuDeviceCreateShaderModule(
             device,
-            .{
-                .bytes = vert_spv.ptr,
-                .length = vert_spv.len,
+            &.{
+                .nextInChain = @ptrCast(&c.WGPUShaderModuleSPIRVDescriptor{
+                    .chain = .{
+                        .sType = c.WGPUSType_ShaderModuleSPIRVDescriptor,
+                    },
+                    .code = vert_spv.ptr,
+                    .codeSize = @intCast(vert_spv.len),
+                }),
             },
         );
-        defer c.wgpu_shader_module_destroy(vert_shader);
+        defer c.wgpuShaderModuleRelease(vert_shader);
 
-        const frag_spv = try shaderc.build_shader_from_file(tmp_alloc, "shaders/grid.frag");
-        const frag_shader = c.wgpu_device_create_shader_module(
+        const frag_spv = try shaderc.build_shader_from_file(&arena, "shaders/grid.frag");
+        const frag_shader = c.wgpuDeviceCreateShaderModule(
             device,
-            .{
-                .bytes = frag_spv.ptr,
-                .length = frag_spv.len,
+            &.{
+                .nextInChain = @ptrCast(&c.WGPUShaderModuleSPIRVDescriptor{
+                    .chain = .{
+                        .sType = c.WGPUSType_ShaderModuleSPIRVDescriptor,
+                    },
+                    .code = frag_spv.ptr,
+                    .codeSize = @intCast(frag_spv.len),
+                }),
             },
         );
-        defer c.wgpu_shader_module_destroy(frag_shader);
+        defer c.wgpuShaderModuleRelease(frag_shader);
 
         ////////////////////////////////////////////////////////////////////////////
         // Upload the font atlas texture
-        const tex_size = (c.WGPUExtent3d){
-            .width = @intCast(font.tex_size),
-            .height = @intCast(font.tex_size),
-            .depth = 1,
+        const tex_size: c.WGPUExtent3D = .{
+            .width = @intCast(atlas.tex_size),
+            .height = @intCast(atlas.tex_size),
+            .depthOrArrayLayers = 1,
         };
 
-        const tex = c.wgpu_device_create_texture(
+        const tex = c.wgpuDeviceCreateTexture(
             device,
             &.{
                 .size = tex_size,
-                .mip_level_count = 1,
-                .sample_count = 1,
+                .mipLevelCount = 1,
+                .sampleCount = 1,
                 .dimension = c.WGPUTextureDimension_D2,
                 .format = c.WGPUTextureFormat_Rgba8Unorm,
                 // SAMPLED tells wgpu that we want to use this texture in shaders
@@ -133,55 +196,54 @@ pub const Renderer = struct {
             },
         );
 
-        const tex_view = c.wgpu_texture_create_view(
+        const tex_view = c.wgpuTextureCreateView(
             tex,
             &.{
                 .label = "font_atlas_view",
                 .dimension = c.WGPUTextureViewDimension_D2,
                 .format = c.WGPUTextureFormat_Rgba8Unorm,
                 .aspect = c.WGPUTextureAspect_All,
-                .base_mip_level = 0,
-                .level_count = 1,
-                .base_array_layer = 0,
-                .array_layer_count = 1,
+                .baseMipLevel = 0,
+                .mipLevelCount = 1,
+                .baseArrayLayer = 0,
+                .arrayLayerCount = 1,
             },
         );
 
-        const tex_sampler = c.wgpu_device_create_sampler(
+        const tex_sampler = c.wgpuDeviceCreateSampler(
             device,
             &.{
-                .next_in_chain = null,
                 .label = "font_atlas_sampler",
-                .address_mode_u = c.WGPUAddressMode_ClampToEdge,
-                .address_mode_v = c.WGPUAddressMode_ClampToEdge,
-                .address_mode_w = c.WGPUAddressMode_ClampToEdge,
-                .mag_filter = c.WGPUFilterMode_Linear,
-                .min_filter = c.WGPUFilterMode_Nearest,
-                .mipmap_filter = c.WGPUFilterMode_Nearest,
-                .lod_min_clamp = 0.0,
-                .lod_max_clamp = std.math.floatMax(f32),
+                .addressModeU = c.WGPUAddressMode_ClampToEdge,
+                .addressModeV = c.WGPUAddressMode_ClampToEdge,
+                .addressModeW = c.WGPUAddressMode_ClampToEdge,
+                .magFilter = c.WGPUFilterMode_Linear,
+                .minFilter = c.WGPUFilterMode_Nearest,
+                .mipmapFilter = c.WGPUFilterMode_Nearest,
+                .lodMinClamp = 0.0,
+                .lodMaxClamp = std.math.floatMax(f32),
                 .compare = c.WGPUCompareFunction_Undefined,
             },
         );
 
         ////////////////////////////////////////////////////////////////////////////
         // Uniform buffers
-        const uniform_buffer = c.wgpu_device_create_buffer(
+        const uniform_buffer = c.wgpuDeviceCreateBuffer(
             device,
             &.{
                 .label = "Uniforms",
                 .size = @sizeOf(c.fpUniforms),
                 .usage = c.WGPUBufferUsage_UNIFORM | c.WGPUBufferUsage_COPY_DST,
-                .mapped_at_creation = false,
+                .mappedAtCreation = false,
             },
         );
-        const char_grid_buffer = c.wgpu_device_create_buffer(
+        const char_grid_buffer = c.wgpuDeviceCreateBuffer(
             device,
             &.{
                 .label = "Character grid",
                 .size = @sizeOf(u32) * 512 * 512,
                 .usage = c.WGPUBufferUsage_STORAGE | c.WGPUBufferUsage_COPY_DST,
-                .mapped_at_creation = false,
+                .mappedAtCreation = false,
             },
         );
 
@@ -190,23 +252,24 @@ pub const Renderer = struct {
         const bind_group_layout_entries = [_]c.WGPUBindGroupLayoutEntry{
             .{
                 .binding = 0,
-                .visibility = c.WGPUShaderStage_FRAGMENT,
+                .visibility = c.WGPUShaderStage_Fragment,
                 .ty = c.WGPUBindingType_SampledTexture,
-
-                .multisampled = false,
-                .view_dimension = c.WGPUTextureViewDimension_D2,
-                .texture_component_type = c.WGPUTextureComponentType_Uint,
-                .storage_texture_format = c.WGPUTextureFormat_Rgba8Unorm,
-
+                .texture = .{
+                    .sampleType = c.WGPUTextureSampleType_Uint,
+                    .multisampled = false,
+                },
+                .storageTexture = .{
+                    .format = c.WGPUTextureFormat_Rgba8Unorm,
+                    .viewDimension = c.WGPUTextureViewDimension_D2,
+                },
                 .count = undefined,
                 .has_dynamic_offset = undefined,
                 .min_buffer_binding_size = undefined,
             },
             .{
                 .binding = 1,
-                .visibility = c.WGPUShaderStage_FRAGMENT,
+                .visibility = c.WGPUShaderStage_Fragment,
                 .ty = c.WGPUBindingType_Sampler,
-
                 .multisampled = undefined,
                 .view_dimension = undefined,
                 .texture_component_type = undefined,
@@ -219,10 +282,8 @@ pub const Renderer = struct {
                 .binding = 2,
                 .visibility = c.WGPUShaderStage_VERTEX | c.WGPUShaderStage_FRAGMENT,
                 .ty = c.WGPUBindingType_UniformBuffer,
-
                 .has_dynamic_offset = false,
                 .min_buffer_binding_size = 0,
-
                 .multisampled = undefined,
                 .view_dimension = undefined,
                 .texture_component_type = undefined,
@@ -233,10 +294,8 @@ pub const Renderer = struct {
                 .binding = 3,
                 .visibility = c.WGPUShaderStage_VERTEX,
                 .ty = c.WGPUBindingType_StorageBuffer,
-
                 .has_dynamic_offset = false,
                 .min_buffer_binding_size = 0,
-
                 .multisampled = undefined,
                 .view_dimension = undefined,
                 .texture_component_type = undefined,
@@ -244,15 +303,15 @@ pub const Renderer = struct {
                 .count = undefined,
             },
         };
-        const bind_group_layout = c.wgpu_device_create_bind_group_layout(
+        const bind_group_layout = c.wgpuDeviceCreateBindGroupLayout(
             device,
             &.{
                 .label = "bind group layout",
                 .entries = &bind_group_layout_entries,
-                .entries_length = bind_group_layout_entries.len,
+                .entryCount = bind_group_layout_entries.len,
             },
         );
-        defer c.wgpu_bind_group_layout_destroy(bind_group_layout);
+        defer c.wgpuBindGroupLayoutRelease(bind_group_layout);
 
         const bind_group_entries = [_]c.WGPUBindGroupEntry{
             .{
@@ -260,7 +319,6 @@ pub const Renderer = struct {
                 .texture_view = tex_view,
                 .sampler = 0, // None
                 .buffer = 0, // None
-
                 .offset = undefined,
                 .size = undefined,
             },
@@ -269,7 +327,6 @@ pub const Renderer = struct {
                 .sampler = tex_sampler,
                 .texture_view = 0, // None
                 .buffer = 0, // None
-
                 .offset = undefined,
                 .size = undefined,
             },
@@ -278,7 +335,6 @@ pub const Renderer = struct {
                 .buffer = uniform_buffer,
                 .offset = 0,
                 .size = @sizeOf(c.fpUniforms),
-
                 .sampler = 0, // None
                 .texture_view = 0, // None
             },
@@ -287,12 +343,11 @@ pub const Renderer = struct {
                 .buffer = char_grid_buffer,
                 .offset = 0,
                 .size = @sizeOf(u32) * 512 * 512,
-
                 .sampler = 0, // None
                 .texture_view = 0, // None
             },
         };
-        const bind_group = c.wgpu_device_create_bind_group(
+        const bind_group = c.wgpuDeviceCreateBindGroup(
             device,
             &.{
                 .label = "bind group",
@@ -301,28 +356,28 @@ pub const Renderer = struct {
                 .entries_length = bind_group_entries.len,
             },
         );
-        const bind_group_layouts = [_]c.WGPUBindGroupId{bind_group_layout};
+        const bind_group_layouts = [_]c.WGPUBindGroupLayout{bind_group_layout};
 
         ////////////////////////////////////////////////////////////////////////////
         // Render pipelines (?!?)
-        const pipeline_layout = c.wgpu_device_create_pipeline_layout(
+        const pipeline_layout = c.wgpuDeviceCreatePipelineLayout(
             device,
             &.{
-                .bind_group_layouts = &bind_group_layouts,
-                .bind_group_layouts_length = bind_group_layouts.len,
+                .bindGroupLayouts = &bind_group_layouts,
+                .bindGroupLayoutCount = bind_group_layouts.len,
             },
         );
-        defer c.wgpu_pipeline_layout_destroy(pipeline_layout);
+        defer c.wgpuPipelineLayoutRelease(pipeline_layout);
 
-        const render_pipeline = c.wgpu_device_create_render_pipeline(
+        const render_pipeline = c.wgpuDeviceCreateRenderPipeline(
             device,
             &.{
                 .layout = pipeline_layout,
-                .vertex_stage = .{
+                .vertex = .{
                     .module = vert_shader,
                     .entry_point = "main",
                 },
-                .fragment_stage = &.{
+                .fragment = &.{
                     .module = frag_shader,
                     .entry_point = "main",
                 },
@@ -361,7 +416,8 @@ pub const Renderer = struct {
             },
         );
 
-        var out = Renderer{
+        var out: Renderer = .{
+            .instance = instance,
             .tex = tex,
             .tex_view = tex_view,
             .tex_sampler = tex_sampler,
@@ -373,7 +429,7 @@ pub const Renderer = struct {
             .device = device,
             .surface = surface,
 
-            .queue = c.wgpu_device_get_default_queue(device),
+            .queue = c.wgpuDeviceGetQueue(device),
 
             .bind_group = bind_group,
             .uniform_buffer = uniform_buffer,
@@ -389,7 +445,7 @@ pub const Renderer = struct {
         };
 
         out.reset_dt();
-        out.update_font_tex(font);
+        out.update_font_tex(atlas);
         return out;
     }
 
@@ -423,17 +479,17 @@ pub const Renderer = struct {
     }
 
     pub fn update_font_tex(self: *Self, font: *const ft.Atlas) void {
-        const tex_size = (c.WGPUExtent3d){
+        const tex_size: c.WGPUExtent3D = .{
             .width = @intCast(font.tex_size),
             .height = @intCast(font.tex_size),
-            .depth = 1,
+            .depthOrArrayLayers = 1,
         };
-        c.wgpu_queue_write_texture(
+        c.wgpuQueueWriteTexture(
             self.queue,
             &.{
                 .texture = self.tex,
                 .mip_level = 0,
-                .origin = (c.WGPUOrigin3d){ .x = 0, .y = 0, .z = 0 },
+                .origin = (c.WGPUOrigin3D){ .x = 0, .y = 0, .z = 0 },
             },
             @ptrCast(font.tex.ptr),
             font.tex.len * @sizeOf(u32),
@@ -462,12 +518,12 @@ pub const Renderer = struct {
         }
 
         // Begin the main render operation
-        const next_texture = c.wgpu_swap_chain_get_next_texture(self.swap_chain);
+        const next_texture = c.wgpuSwapChainGetNextTexture(self.swap_chain);
         if (next_texture.view_id == 0) {
             std.debug.panic("Cannot acquire next swap chain texture", .{});
         }
 
-        const cmd_encoder = c.wgpu_device_create_command_encoder(
+        const cmd_encoder = c.wgpuDeviceCreateCommandEncoder(
             self.device,
             &(c.WGPUCommandEncoderDescriptor){ .label = "main encoder" },
         );
@@ -490,7 +546,7 @@ pub const Renderer = struct {
             },
         };
 
-        const rpass = c.wgpu_command_encoder_begin_render_pass(
+        const rpass = c.wgpuCommandEncoderBeginRenderPass(
             cmd_encoder,
             &.{
                 .color_attachments = &color_attachments,
@@ -499,18 +555,17 @@ pub const Renderer = struct {
             },
         );
 
-        c.wgpu_render_pass_set_pipeline(rpass, self.render_pipeline);
-        c.wgpu_render_pass_set_bind_group(rpass, 0, self.bind_group, null, 0);
-        c.wgpu_render_pass_draw(rpass, total_tiles * 6, 1, 0, 0);
-        c.wgpu_render_pass_end_pass(rpass);
+        c.wgpuRenderPassEncoderSetPipeline(rpass, self.render_pipeline);
+        c.wgpuRenderPassEncoderSetBindGroup(rpass, 0, self.bind_group, null, 0);
+        c.wgpuRenderPassEncoderDraw(rpass, total_tiles * 6, 1, 0, 0);
         if (self.preview != null) {
             self.blit.redraw(next_texture, cmd_encoder);
         }
 
-        const cmd_buf = c.wgpu_command_encoder_finish(cmd_encoder, null);
-        c.wgpu_queue_submit(self.queue, &cmd_buf, 1);
+        const cmd_buf = c.wgpuCommandEncoderFinish(cmd_encoder, null);
+        c.wgpuQueueSubmit(self.queue, &cmd_buf, 1);
 
-        c.wgpu_swap_chain_present(self.swap_chain);
+        c.wgpuSwapChainPresent(self.swap_chain);
 
         const end_ms = std.time.milliTimestamp();
         self.dt[self.dt_index] = end_ms - start_ms;
@@ -530,15 +585,16 @@ pub const Renderer = struct {
     }
 
     pub fn deinit(self: *Self, alloc: std.mem.Allocator) void {
-        c.wgpu_texture_destroy(self.tex);
-        c.wgpu_texture_view_destroy(self.tex_view);
-        c.wgpu_sampler_destroy(self.tex_sampler);
+        c.wgpuInstanceRelease(self.instance);
+        c.wgpuTextureRelease(self.tex);
+        c.wgpuTextureViewRelease(self.tex_view);
+        c.wgpuSamplerRelease(self.tex_sampler);
 
-        c.wgpu_bind_group_destroy(self.bind_group);
-        c.wgpu_buffer_destroy(self.uniform_buffer);
-        c.wgpu_buffer_destroy(self.char_grid_buffer);
+        c.wgpuBindGroupRelease(self.bind_group);
+        c.wgpuBufferRelease(self.uniform_buffer);
+        c.wgpuBufferRelease(self.char_grid_buffer);
 
-        c.wgpu_render_pipeline_destroy(self.render_pipeline);
+        c.wgpuRenderPipelineRelease(self.render_pipeline);
 
         if (self.preview) |p| {
             p.deinit();
@@ -548,7 +604,7 @@ pub const Renderer = struct {
     }
 
     pub fn update_grid(self: *Self, char_grid: []u32) void {
-        c.wgpu_queue_write_buffer(
+        c.wgpuQueueWriteBuffer(
             self.queue,
             self.char_grid_buffer,
             0,
@@ -558,7 +614,7 @@ pub const Renderer = struct {
     }
 
     pub fn resize_swap_chain(self: *Self, width: u32, height: u32) void {
-        self.swap_chain = c.wgpu_device_create_swap_chain(
+        self.swap_chain = c.wgpuDeviceCreateSwapChain(
             self.device,
             self.surface,
             &.{
@@ -581,7 +637,7 @@ pub const Renderer = struct {
     }
 
     pub fn update_uniforms(self: *Self, u: *const c.fpUniforms) void {
-        c.wgpu_queue_write_buffer(
+        c.wgpuQueueWriteBuffer(
             self.queue,
             self.uniform_buffer,
             0,
@@ -591,7 +647,18 @@ pub const Renderer = struct {
     }
 };
 
-export fn adapter_cb(received: c.WGPUAdapterId, data: ?*anyopaque) void {
-    const ptr: *c.WGPUAdapterId = @ptrCast(@alignCast(data));
-    ptr.* = received;
+export fn handleRequestAdapter(status: c.WGPURequestAdapterStatus, received: c.WGPUAdapter, _: [*c]const u8, userdata: ?*anyopaque) void {
+    std.debug.assert(status == c.WGPURequestAdapterStatus_Success);
+    const ctx: *AsyncContext = @ptrCast(@alignCast(userdata));
+    const adapter: *c.WGPUAdapter = @ptrCast(@alignCast(ctx.data));
+    adapter.* = received;
+    ctx.event.set();
+}
+
+export fn handleRequestDevice(status: c.WGPURequestDeviceStatus, received: c.WGPUDevice, _: [*c]const u8, userdata: ?*anyopaque) void {
+    std.debug.assert(status == c.WGPURequestDeviceStatus_Success);
+    const ctx: *AsyncContext = @ptrCast(@alignCast(userdata));
+    const device: *c.WGPUDevice = @ptrCast(@alignCast(ctx.data));
+    device.* = received;
+    ctx.event.set();
 }

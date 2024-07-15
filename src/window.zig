@@ -8,16 +8,14 @@ pub const Window = struct {
     window: *c.GLFWwindow,
 
     pub fn init(width: c_int, height: c_int, name: [*c]const u8) !Self {
-        const window = c.glfwCreateWindow(width, height, name, null, null);
-
-        // Open the window!
-        if (window) |w| {
-            return Window{ .window = w };
-        } else {
+        const window = c.glfwCreateWindow(width, height, name, null, null) orelse {
             var err_str: [*c]u8 = null;
             const err = c.glfwGetError(&err_str);
-            std.debug.panic("Failed to open window: {} ({s})", .{ err, err_str });
-        }
+            std.log.err("Failed to open window: {} ({s})", .{ err, err_str });
+            return error.WindowInitFailed;
+        };
+
+        return .{ .window = window };
     }
 
     pub fn deinit(self: *Self) void {

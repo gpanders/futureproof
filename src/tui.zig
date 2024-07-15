@@ -29,7 +29,7 @@ pub const Tui = struct {
     window: Window,
     renderer: Renderer,
     rpc: RPC,
-    font: ft.Atlas,
+    atlas: ft.Atlas,
 
     buffers: std.AutoHashMap(u32, *Buffer),
     debounce: Debounce,
@@ -54,7 +54,7 @@ pub const Tui = struct {
 
     pub fn deinit(self: *Self) void {
         self.rpc.deinit();
-        self.font.deinit();
+        self.atlas.deinit();
         self.window.deinit();
         self.renderer.deinit(self.alloc);
 
@@ -89,16 +89,16 @@ pub const Tui = struct {
         var width: c_int = 900;
         var height: c_int = 600;
 
-        var window = try Window.init(width, height, "futureproof");
+        const window = try Window.init(width, height, "futureproof");
         c.glfwGetFramebufferSize(window.window, &width, &height);
 
-        const font = try ft.build_atlas(
+        const font = try ft.Atlas.init(
             alloc,
             FONT_NAME,
             FONT_SIZE,
             512,
         );
-        const renderer = try Renderer.init(tmp_alloc, window.window, &font);
+        const renderer = try Renderer.init(alloc, window.window, &font);
 
         const x_tiles: u32 = @as(u32, @intCast(width)) / font.u.glyph_advance;
         const y_tiles: u32 = @as(u32, @intCast(height)) / font.u.glyph_height;
@@ -307,20 +307,20 @@ pub const Tui = struct {
             const codepoint = decode_utf8(text);
 
             var char: u32 = undefined;
-            if (self.font.get_glyph(codepoint)) |g| {
+            if (self.atlas.get_glyph(codepoint)) |g| {
                 char = g;
             } else {
                 std.debug.print("Adding new codepoint: {x}\n", .{codepoint});
-                char = self.font.add_glyph(codepoint) catch |err| {
+                char = self.atlas.add_glyph(codepoint) catch |err| {
                     std.debug.panic("Could not add glyph {}: {}\n", .{ codepoint, err });
                 };
                 // We've only added one glyph to the texture, so just copy
                 // this one line over to our local uniforms:
-                self.u.font.glyphs[char] = self.font.u.glyphs[char];
+                self.u.font.glyphs[char] = self.atlas.u.glyphs[char];
 
                 // Then send the updated atlas and texture to the GPU
                 self.renderer.update_uniforms(&self.u);
-                self.renderer.update_font_tex(&self.font);
+                self.renderer.update_font_tex(&self.atlas);
             }
 
             std.debug.assert(char < self.u.font.glyphs.len);
@@ -657,8 +657,8 @@ pub const Tui = struct {
         if (density != self.pixel_density) {
             self.pixel_density = density;
 
-            self.font.deinit();
-            self.font = ft.build_atlas(
+            self.atlas.deinit();
+            self.atlas = ft.Atlas.init(
                 self.alloc,
                 FONT_NAME,
                 FONT_SIZE * self.pixel_density,
@@ -666,8 +666,8 @@ pub const Tui = struct {
             ) catch |err| {
                 std.debug.panic("Could not rebuild font: {}\n", .{err});
             };
-            self.u.font = self.font.u;
-            self.renderer.update_font_tex(&self.font);
+            self.u.font = self.atlas.u;
+            self.renderer.update_font_tex(&self.atlas);
         }
 
         const cursor_x = self.char_grid[self.total_tiles];

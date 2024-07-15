@@ -17,7 +17,7 @@ pub fn build(b: *std.Build) void {
     exe.linkSystemLibrary("shaderc_combined");
 
     exe.addLibraryPath(b.path("vendor/wgpu"));
-    exe.linkSystemLibrary("wgpu_native");
+    exe.root_module.linkSystemLibrary("wgpu_native", .{ .preferred_link_mode = .static });
     exe.addIncludePath(b.path("vendor")); // "wgpu/wgpu.h" is the wgpu header
 
     exe.addIncludePath(b.path(".")); // for "extern/futureproof.h"

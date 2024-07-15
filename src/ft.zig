@@ -27,9 +27,59 @@ pub const Atlas = struct {
     // Uniforms (synchronized with the GPU)
     u: c.fpAtlasUniforms,
 
+    pub fn init(
+        alloc: std.mem.Allocator,
+        font_name: []const u8,
+        font_size: u32,
+        tex_size: u32,
+    ) !Self {
+        const tex = try alloc.alloc(u32, tex_size * tex_size);
+        errdefer alloc.free(tex);
+
+        @memset(tex, 128);
+        var out: Self = .{
+            .alloc = alloc,
+
+            .tex = tex,
+            .tex_size = tex_size,
+
+            .x = 1,
+            .y = 1,
+            .glyph_index = 0x20,
+            .max_row_height = 0,
+            .has_advance = false,
+
+            // Freetype handles
+            .ft = undefined,
+            .face = undefined,
+
+            .table = .{},
+
+            // GPU uniforms
+            .u = undefined,
+        };
+        out.u.glyph_height = font_size;
+
+        try status_to_err(c.FT_Init_FreeType(&out.ft));
+        errdefer _ = c.FT_Done_FreeType(out.ft);
+
+        try status_to_err(c.FT_New_Face(out.ft, font_name.ptr, 0, &out.face));
+        try status_to_err(c.FT_Set_Pixel_Sizes(
+            out.face,
+            @intCast(font_size),
+            @intCast(font_size),
+        ));
+
+        for (out.glyph_index..0x7f) |i| {
+            _ = try out.add_glyph(i);
+        }
+
+        return out;
+    }
+
     pub fn deinit(self: *Self) void {
         status_to_err(c.FT_Done_FreeType(self.ft)) catch |err| {
-            std.debug.panic("Could not destroy library: {}", .{err});
+            std.debug.print("Could not destroy library: {}\n", .{err});
         };
         self.alloc.free(self.tex);
         self.table.deinit(self.alloc);
@@ -55,7 +105,7 @@ pub const Atlas = struct {
         try status_to_err(c.FT_Load_Glyph(
             self.face,
             char_index,
-            0,
+            c.FT_LOAD_DEFAULT,
         ));
         try status_to_err(c.FT_Render_Glyph(
             self.face.*.glyph,
@@ -75,7 +125,7 @@ pub const Atlas = struct {
         }
 
         // Calculate true width (ignoring RGB, which triples width)
-        const bmp_width = bmp.*.width / 3;
+        const bmp_width = bmp.width / 3;
 
         // Reset to the beginning of the line
         if (self.x + bmp_width >= self.tex_size) {
@@ -83,20 +133,15 @@ pub const Atlas = struct {
             self.x = 1;
             self.max_row_height = 0;
         }
-        if (self.y + bmp.*.rows >= self.tex_size) {
+        if (self.y + bmp.rows >= self.tex_size) {
             std.debug.panic("Ran out of atlas space", .{});
-        } else if (bmp.*.rows > self.max_row_height) {
-            self.max_row_height = bmp.*.rows;
+        } else if (bmp.rows > self.max_row_height) {
+            self.max_row_height = bmp.rows;
         }
-        var row: usize = 0;
-        const pitch: usize = @intCast(bmp.*.pitch);
-        while (row < bmp.*.rows) : (row += 1) {
-            var col: usize = 0;
-            while (col < bmp_width) : (col += 1) {
-                const p: u32 = 0 |
-                    @as(u32, @intCast(bmp.*.buffer[row * pitch + col * 3])) |
-                    (@as(u32, @intCast(bmp.*.buffer[row * pitch + col * 3 + 1])) << 8) |
-                    (@as(u32, @intCast(bmp.*.buffer[row * pitch + col * 3 + 2])) << 16);
+        const pitch: usize = @intCast(bmp.pitch);
+        for (0..bmp.rows) |row| {
+            for (0..bmp_width) |col| {
+                const p = std.mem.readVarInt(u32, bmp.buffer[row * pitch + col * 3][0..3], .little);
                 self.tex[self.x + col + self.tex_size * (row + self.y)] = p;
             }
         }
@@ -114,53 +159,6 @@ pub const Atlas = struct {
         return g;
     }
 };
-
-pub fn build_atlas(
-    alloc: std.mem.Allocator,
-    comptime font_name: []const u8,
-    font_size: u32,
-    tex_size: u32,
-) !Atlas {
-    const tex = try alloc.alloc(u32, tex_size * tex_size);
-    @memset(tex, 128);
-    var out = Atlas{
-        .alloc = alloc,
-
-        .tex = tex,
-        .tex_size = tex_size,
-
-        .x = 1,
-        .y = 1,
-        .glyph_index = 32,
-        .max_row_height = 0,
-        .has_advance = false,
-
-        // Freetype handles
-        .ft = undefined,
-        .face = undefined,
-
-        .table = .{},
-
-        // GPU uniforms
-        .u = undefined,
-    };
-    out.u.glyph_height = font_size;
-
-    try status_to_err(c.FT_Init_FreeType(&out.ft));
-    try status_to_err(c.FT_New_Face(out.ft, font_name.ptr, 0, &out.face));
-    try status_to_err(c.FT_Set_Pixel_Sizes(
-        out.face,
-        @intCast(font_size),
-        @intCast(font_size),
-    ));
-
-    var i = out.glyph_index;
-    while (i < 127) : (i += 1) {
-        _ = try out.add_glyph(i);
-    }
-
-    return out;
-}
 
 ////////////////////////////////////////////////////////////////////////////////
 // TODO: generate all of this at comptime
